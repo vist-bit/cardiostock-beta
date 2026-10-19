@@ -13,7 +13,7 @@
 // жодного PIN у query-параметрі URL: URL-адреси осідають у логах Apps
 // Script/проксі-серверів і в історії браузера, тіло POST-запиту — ні.
 
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzgvDMVSdhULfVeBbHcgsCgweMhYNpN0UDX4vSdXotIME7DEGdHn3wwn2h4Y6vbsUydIg/exec';
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzGQ66LSiG4Gufrl7E_ihdzh3FWZc50tAuPiCcjBzq5Mev56NXerqSbl0zfa9_ePuwB9A/exec';
 
 /**
  * Виконує дію на сервері — і читання ('getAll'), і запис (addStock,
