@@ -1222,7 +1222,6 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
 
 const StockIn = ({ state, dispatch, sessionPin }) => {
   const [showImport, setShowImport] = useState(false);
-  const [showScanner, setShowScanner] = useState(false);
   const [formData, setFormData] = useState({ code: '', lot: '', serial: '', size: '', exp: '', quantity: 1 });
   const [message, setMessage] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -1249,23 +1248,6 @@ const StockIn = ({ state, dispatch, sessionPin }) => {
       str(m.name).toLowerCase().includes(query) || str(m.code).toLowerCase().includes(query)
     ).slice(0, 10);
   }, [searchQuery, state.materials]);
-
-  const handleScan = (codeStr) => {
-    setShowScanner(false);
-    const parsed = parseBarcode(codeStr);
-    if (!parsed.code) { showMsg('error', 'Неможливо розпізнати код.'); return; }
-
-    setFormData({ code: parsed.code, lot: parsed.lot || '', serial: parsed.serial || '', size: '', exp: parsed.exp || '', quantity: 1 });
-
-    const mat = state.materials.find(m => m.code === parsed.code);
-    if (mat) {
-      setSearchQuery(mat.name);
-      showMsg('success', `Розпізнано: ${mat.name}`);
-    } else {
-      setSearchQuery(parsed.code);
-      showMsg('warning', `Новий код: ${parsed.code}. Спочатку додайте його в довідник.`);
-    }
-  };
 
   const handleSelectMaterial = (mat) => {
     setFormData({ ...formData, code: mat.code });
@@ -1304,15 +1286,11 @@ const StockIn = ({ state, dispatch, sessionPin }) => {
 
   return (
     <div className="max-w-2xl mx-auto animate-in slide-in-from-bottom-4 duration-500">
-      {showScanner && <BarcodeScanner onScan={handleScan} onClose={() => setShowScanner(false)} />}
       {showImport && <DocumentImportModal state={state} dispatch={dispatch} sessionPin={sessionPin} onClose={() => setShowImport(false)} />}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-2xl">
          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
             <h2 className="text-xl font-black text-white flex items-center gap-3"><div className="p-2 bg-teal-500/10 rounded-xl text-teal-500"><PackagePlus size={24} /></div>Прихід товару</h2>
-            <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
-              <button onClick={() => setShowImport(true)} className="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-teal-400 px-5 py-2.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors border border-slate-700"><Upload size={18} /> Імпорт з документа</button>
-              <button onClick={() => setShowScanner(true)} className="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-teal-400 px-5 py-2.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors border border-slate-700"><Camera size={18} /> Сканувати</button>
-            </div>
+            <button onClick={() => setShowImport(true)} className="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-teal-400 px-5 py-2.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors border border-slate-700"><Upload size={18} /> Імпорт з документа</button>
          </div>
          {message && <div className={`p-4 rounded-xl border mb-6 flex items-center gap-3 text-sm font-medium ${message.type === 'error' ? 'bg-rose-950/80 border-rose-900 text-rose-200' : message.type === 'warning' ? 'bg-amber-950/80 border-amber-900 text-amber-200' : 'bg-teal-950/80 border-teal-900 text-teal-200'}`}><AlertTriangle size={18}/> {message.text}</div>}
 
@@ -1326,7 +1304,7 @@ const StockIn = ({ state, dispatch, sessionPin }) => {
                   onChange={e => { setSearchQuery(e.target.value); setFormData({ ...formData, code: e.target.value }); setShowDropdown(true); }}
                   onFocus={() => setShowDropdown(true)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 pl-10 text-teal-400 focus:ring-2 focus:ring-teal-500 outline-none font-bold tracking-wide"
-                  placeholder="Введіть назву або відскануйте код..."
+                  placeholder="Введіть назву або код..."
                 />
                 {showDropdown && (
                   <div className="absolute z-50 w-full mt-2 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden max-h-60 overflow-y-auto">
