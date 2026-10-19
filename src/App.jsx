@@ -2,10 +2,11 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   HeartPulse, ScanBarcode, PackagePlus, Activity, AlertTriangle, Database, Download, CheckCircle,
   X, Search, Trash2, Camera, Calendar, Filter, ArrowDownUp, Lock, Unlock, Edit2, Clock,
-  PieChart as PieChartIcon, BarChart3, Users, Shield, ClipboardList, RefreshCw
+  PieChart as PieChartIcon, BarChart3, Users, Shield, ClipboardList, RefreshCw, Upload, FileText
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { fetchAllData, callAction as rawCallAction } from './appsScriptClient';
+import { parseDocumentFile, matchItem, matchItems } from './documentImport';
 
 // Сервер відповідає цим текстом (Code.gs, authorize_), коли PIN поточної сесії більше не існує:
 // адмін змінив PIN або видалив обліковий запис. Тоді сесію треба завершити, а не лишати
@@ -868,7 +869,359 @@ const PostOpExpense = ({ state, dispatch, sessionPin }) => {
   );
 };
 
+// ---------- Імпорт приходу з документа (PDF / Word / фото) ----------
+// Потік: файл → розбір таблиці (documentImport.js) → зіставлення з довідником → ПЕРЕВІРКА і правки користувачем →
+// один пакетний запит addStockBatch (усе або нічого). Нічого не додається на склад без явного підтвердження.
+const IMPORT_ACCEPT = '.pdf,.docx,.jpg,.jpeg,.png,application/pdf,image/*';
+
+const IMPORT_BADGES = {
+  code:      { text: 'Збіг за артикулом',   cls: 'bg-teal-500/10 text-teal-400 border-teal-500/30' },
+  name:      { text: 'Збіг за назвою',      cls: 'bg-teal-500/10 text-teal-400 border-teal-500/30' },
+  similar:   { text: 'Схоже — перевірте',   cls: 'bg-amber-500/10 text-amber-400 border-amber-500/30' },
+  ambiguous: { text: 'Кілька збігів — оберіть', cls: 'bg-amber-500/10 text-amber-400 border-amber-500/30' },
+  manual:    { text: 'Обрано вручну',       cls: 'bg-slate-700 text-slate-200 border-slate-600' },
+  none:      { text: 'Не знайдено в довіднику', cls: 'bg-rose-500/10 text-rose-400 border-rose-500/30' }
+};
+
+const todayLocalStr = () => {
+  const d = new Date(); const p2 = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+};
+
+const buildImportRow = (item, match, index) => {
+  const confident = (match.kind === 'code' || match.kind === 'name') && !match.ambiguous;
+  return {
+    key: `imp${index}`,
+    rowNo: item.rowNo, docName: item.name, unit: item.unit,
+    requested: item.requested, issued: item.issued, qtySource: item.qtySource,
+    materialId: match.materialId || '',
+    kind: match.materialId ? match.kind : 'none',
+    ambiguous: !!match.ambiguous,
+    candidates: match.candidates || [],
+    selected: confident,   // автоматично відмічаємо лише впевнені збіги; "схожі" користувач відмічає сам
+    qty: item.qty === null || item.qty === undefined ? '' : String(item.qty),
+    lot: '', expiry: '', added: false
+  };
+};
+
+const importProblems = (r) => {
+  const p = [];
+  if (!r.materialId) p.push('material');
+  if (!(Number(r.qty) > 0)) p.push('qty');
+  if (!r.lot.trim()) p.push('lot');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(r.expiry)) p.push('expiry');
+  return p;
+};
+
+const ImportMaterialPicker = ({ materials, value, candidates, onChange, invalid }) => {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const byId = useMemo(() => { const m = {}; materials.forEach(x => { m[x.id] = x; }); return m; }, [materials]);
+  const selected = byId[value];
+  const list = useMemo(() => {
+    const t = q.trim().toLowerCase();
+    const src = t ? materials.filter(m => str(m.name).toLowerCase().includes(t) || str(m.code).toLowerCase().includes(t)) : materials;
+    return src.slice(0, 8);
+  }, [materials, q]);
+  const suggestions = (candidates || []).filter(c => c.id !== value && byId[c.id]).slice(0, 3);
+
+  return (
+    <div className="space-y-2">
+      <button type="button" onClick={() => setOpen(o => !o)} aria-label="Обрати матеріал з довідника"
+        className={`w-full text-left px-3 py-2.5 rounded-xl border text-sm flex items-center justify-between gap-2 bg-slate-950 ${invalid ? 'border-rose-500' : 'border-slate-800'} ${selected ? 'text-white' : 'text-slate-500'}`}>
+        <span className="truncate">{selected ? `${selected.name}${str(selected.code) ? ` · ${selected.code}` : ''}` : 'Оберіть матеріал з довідника…'}</span>
+        <Search size={14} className="shrink-0 text-slate-500" />
+      </button>
+      {!selected && suggestions.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {suggestions.map(c => (
+            <button key={c.id} type="button" onClick={() => onChange(c.id)} className="text-[11px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 max-w-full truncate">
+              Схожий: {byId[c.id].name}
+            </button>
+          ))}
+        </div>
+      )}
+      {open && (
+        <div className="rounded-xl border border-slate-700 bg-slate-950 p-2 space-y-1">
+          <input autoFocus type="text" value={q} onChange={e => setQ(e.target.value)} placeholder="Пошук за назвою чи кодом…" className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white outline-none" />
+          {list.length === 0 && <div className="px-3 py-2 text-xs text-slate-500">Нічого не знайдено</div>}
+          {list.map(m => (
+            <button key={m.id} type="button" onClick={() => { onChange(m.id); setOpen(false); setQ(''); }} className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 text-sm text-slate-200">
+              {m.name} <span className="text-slate-500">{str(m.code) ? `· ${m.code}` : ''}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
+  const [askConfirm, confirmDialog] = useConfirm();
+  const [phase, setPhase] = useState('pick'); // pick | parsing | review
+  const [progress, setProgress] = useState({ label: '', pct: null });
+  const [error, setError] = useState('');
+  const [fileName, setFileName] = useState('');
+  const [source, setSource] = useState('');
+  const [warnings, setWarnings] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [filter, setFilter] = useState('all');
+  const [bulkExpiry, setBulkExpiry] = useState('');
+  const [showErrors, setShowErrors] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [addedCount, setAddedCount] = useState(0);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [showOriginal, setShowOriginal] = useState(false);
+  const fileInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const previewRef = useRef('');
+
+  useEffect(() => () => { if (previewRef.current) URL.revokeObjectURL(previewRef.current); }, []);
+
+  const setPreview = (url) => {
+    if (previewRef.current) URL.revokeObjectURL(previewRef.current);
+    previewRef.current = url; setPreviewUrl(url);
+  };
+
+  const reset = () => {
+    setPhase('pick'); setRows([]); setWarnings([]); setError(''); setSaveError(''); setShowErrors(false);
+    setFileName(''); setSource(''); setAddedCount(0); setFilter('all'); setShowOriginal(false); setPreview('');
+  };
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setError(''); setSaveError(''); setPhase('parsing'); setFileName(file.name || 'документ');
+    setProgress({ label: 'Починаю…', pct: null });
+    try {
+      const parsed = await parseDocumentFile(file, { onProgress: setProgress });
+      const matches = matchItems(parsed.items, state.materials);
+      setRows(matches.map(({ item, match }, i) => buildImportRow(item, match, i)));
+      setWarnings(parsed.warnings || []); setSource(parsed.source || ''); setAddedCount(0); setFilter('all'); setShowErrors(false);
+      setPreview((file.type || '').startsWith('image/') ? URL.createObjectURL(file) : '');
+      setPhase('review');
+    } catch (e) {
+      console.error('Помилка розбору документа:', e);
+      setError(e.message || 'Не вдалося розібрати документ.');
+      setPhase('pick');
+    }
+  };
+
+  const onFileChosen = (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleFile(f); };
+
+  const patchRow = (key, patch) => setRows(prev => prev.map(r => (r.key === key ? { ...r, ...patch } : r)));
+
+  // Користувач виправив назву з документа → шукаємо збіг заново (якщо матеріал не обрано вручну).
+  const rematch = (key) => setRows(prev => prev.map(r => {
+    if (r.key !== key || r.kind === 'manual' || r.added) return r;
+    const m = matchItem({ name: r.docName, code: '' }, state.materials);
+    return { ...r, materialId: m.materialId || '', kind: m.materialId ? m.kind : 'none', ambiguous: !!m.ambiguous, candidates: m.candidates, selected: m.materialId ? r.selected : false };
+  }));
+
+  const counts = {
+    all: rows.length,
+    matched: rows.filter(r => r.materialId).length,
+    missing: rows.filter(r => !r.materialId).length,
+    selected: rows.filter(r => r.selected && !r.added).length
+  };
+  const visibleRows = rows.filter(r => (filter === 'matched' ? !!r.materialId : filter === 'missing' ? !r.materialId : filter === 'selected' ? (r.selected && !r.added) : true));
+  const chosen = rows.filter(r => r.selected && !r.added);
+  const totalQty = chosen.reduce((n, r) => n + (Number(r.qty) > 0 ? Number(r.qty) : 0), 0);
+  const today = todayLocalStr();
+
+  const applyBulkExpiry = () => {
+    if (!bulkExpiry) return;
+    setRows(prev => prev.map(r => (r.selected && !r.added && !r.expiry ? { ...r, expiry: bulkExpiry } : r)));
+  };
+
+  const handleSubmit = async () => {
+    if (isSaving) return;
+    setShowErrors(true); setSaveError('');
+    if (chosen.length === 0) { setSaveError('Відмітьте хоча б одну позицію.'); return; }
+    const bad = chosen.filter(r => importProblems(r).length > 0);
+    if (bad.length > 0) { setSaveError(`Заповніть обов'язкові поля (матеріал, кількість, LOT, термін) у ${bad.length} поз. — вони підсвічені.`); return; }
+    const expired = chosen.filter(r => r.expiry < today);
+    if (expired.length > 0) {
+      const ok = await askConfirm({
+        title: 'Є прострочені партії',
+        message: `У ${expired.length} поз. термін придатності вже минув — це може бути помилка в даті. Додати все одно?`,
+        confirmLabel: 'Додати все одно'
+      });
+      if (!ok) return;
+    }
+    setIsSaving(true);
+    try {
+      const items = chosen.map(r => ({ material_id: r.materialId, lot_number: r.lot.trim(), expiration_date: r.expiry, quantity: Number(r.qty) }));
+      const result = await callAction('addStockBatch', { items, source: fileName }, sessionPin);
+      if (!result.success) {
+        const bad1 = typeof result.rowIndex === 'number' ? chosen[result.rowIndex] : null;
+        setSaveError(bad1 ? `${String(result.error).replace(/^Рядок \d+:\s*/, '')} — «${bad1.docName}»` : (result.error || 'Не вдалося додати.'));
+        return;
+      }
+      result.data.batches.forEach(b => dispatch({ type: 'ADD_STOCK', payload: b }));
+      const doneKeys = new Set(chosen.map(r => r.key));
+      setRows(prev => prev.map(r => (doneKeys.has(r.key) ? { ...r, added: true, selected: false } : r)));
+      setAddedCount(n => n + chosen.length);
+      setShowErrors(false);
+    } catch (e) {
+      console.error(e);
+      setSaveError(e.message || "Немає з'єднання з сервером.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const isOcr = source.includes('ocr');
+  const inputCls = (bad) => `w-full bg-slate-950 border rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-teal-500 ${bad ? 'border-rose-500' : 'border-slate-800'}`;
+
+  return (
+    <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-sm z-50 flex justify-center items-stretch md:items-center p-0 md:p-4">
+      <div className="bg-slate-900 border border-slate-800 w-full max-w-4xl md:rounded-3xl shadow-2xl flex flex-col h-full md:h-[92vh]">
+        <div className="shrink-0 flex items-center justify-between gap-3 p-4 md:p-5 border-b border-slate-800">
+          <div className="min-w-0">
+            <h3 className="text-lg font-bold text-white flex items-center gap-2"><FileText size={20} className="text-teal-500 shrink-0" /> Імпорт приходу з документа</h3>
+            {phase === 'review' && <p className="text-xs text-slate-500 mt-0.5 truncate">{fileName}</p>}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {phase === 'review' && <button onClick={reset} className="text-xs font-bold text-slate-400 hover:text-white px-3 py-2 rounded-xl bg-slate-800">Інший файл</button>}
+            <button onClick={onClose} aria-label="Закрити" className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800"><X size={20} /></button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {phase === 'pick' && (
+            <div className="p-6 md:p-10 flex flex-col items-center text-center gap-5">
+              <div className="p-4 bg-teal-500/10 rounded-2xl text-teal-400"><FileText size={36} /></div>
+              <div className="max-w-md space-y-2">
+                <h4 className="text-white font-bold text-lg">Оберіть документ</h4>
+                <p className="text-sm text-slate-400">PDF, Word (.docx) або фото накладної (JPG, PNG). Програма розбере таблицю й знайде вироби в довіднику, а ви перевірите й за потреби виправите дані перед додаванням на склад.</p>
+              </div>
+              {error && <div role="alert" className="max-w-md w-full bg-rose-950/60 border border-rose-900 text-rose-200 text-sm rounded-xl p-4 text-left flex gap-3"><AlertTriangle size={18} className="shrink-0 mt-0.5" /> {error}</div>}
+              {state.materials.length === 0 && <div className="max-w-md w-full bg-amber-950/60 border border-amber-900 text-amber-200 text-sm rounded-xl p-4 text-left">Довідник порожній: спершу додайте матеріали у вкладці «Довідник».</div>}
+              <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                <button onClick={() => fileInputRef.current && fileInputRef.current.click()} className="bg-teal-600 hover:bg-teal-500 text-white font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2"><Upload size={18} /> Обрати файл</button>
+                <button onClick={() => cameraInputRef.current && cameraInputRef.current.click()} className="bg-slate-800 hover:bg-slate-700 text-teal-400 font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 border border-slate-700"><Camera size={18} /> Сфотографувати</button>
+              </div>
+              <input ref={fileInputRef} type="file" accept={IMPORT_ACCEPT} className="hidden" onChange={onFileChosen} data-testid="import-file" />
+              <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onFileChosen} data-testid="import-camera" />
+              <p className="text-xs text-slate-500 max-w-md">Файл обробляється у вашому браузері й нікуди не надсилається. Фото розпізнаються гірше за PDF/Word — такі результати завжди звіряйте з оригіналом.</p>
+            </div>
+          )}
+
+          {phase === 'parsing' && (
+            <div className="p-10 flex flex-col items-center gap-4 text-center" role="status">
+              <RefreshCw size={32} className="text-teal-500 animate-spin" />
+              <p className="text-white font-bold">{progress.label || 'Обробка…'}</p>
+              {progress.pct !== null && progress.pct !== undefined && (
+                <div className="w-full max-w-xs h-2 bg-slate-800 rounded-full overflow-hidden"><div className="h-full bg-teal-500 transition-all" style={{ width: `${progress.pct}%` }} /></div>
+              )}
+              <p className="text-xs text-slate-500">{fileName}</p>
+            </div>
+          )}
+
+          {phase === 'review' && (
+            <div className="p-4 md:p-5 space-y-4">
+              {warnings.length > 0 && (
+                <div className={`rounded-xl border p-4 text-sm space-y-1 ${isOcr ? 'bg-rose-950/40 border-rose-900 text-rose-200' : 'bg-amber-950/40 border-amber-900 text-amber-200'}`} role="alert">
+                  {warnings.map((w, i) => <div key={i} className="flex gap-2"><AlertTriangle size={16} className="shrink-0 mt-0.5" /> {w}</div>)}
+                </div>
+              )}
+              {previewUrl && (
+                <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+                  <button onClick={() => setShowOriginal(v => !v)} className="text-sm font-bold text-teal-400 hover:text-teal-300">{showOriginal ? 'Сховати оригінал' : 'Показати оригінал для звірки'}</button>
+                  {showOriginal && <a href={previewUrl} target="_blank" rel="noreferrer" className="block mt-3"><img src={previewUrl} alt="Оригінал документа" className="w-full max-h-96 object-contain rounded-lg bg-white" /></a>}
+                </div>
+              )}
+              {addedCount > 0 && <div className="rounded-xl border border-teal-900 bg-teal-950/40 text-teal-200 text-sm p-4 flex gap-2" role="status"><CheckCircle size={18} className="shrink-0" /> Додано на склад: {addedCount} поз.</div>}
+
+              <div className="flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+                <div className="flex flex-wrap gap-2">
+                  {[['all', 'Усі'], ['matched', 'Знайдені'], ['missing', 'Не знайдені'], ['selected', 'Відмічені']].map(([id, label]) => (
+                    <button key={id} onClick={() => setFilter(id)} aria-pressed={filter === id} className={`px-3 py-2 rounded-xl text-xs font-bold border ${filter === id ? 'bg-teal-500/10 text-teal-400 border-teal-500/30' : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'}`}>{label} ({counts[id]})</button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-2 items-center">
+                  <button onClick={() => setRows(prev => prev.map(r => (r.materialId && !r.added ? { ...r, selected: true } : r)))} className="text-xs font-bold text-slate-300 hover:text-white px-3 py-2 rounded-xl bg-slate-800">Відмітити всі знайдені</button>
+                  <button onClick={() => setRows(prev => prev.map(r => ({ ...r, selected: false })))} className="text-xs font-bold text-slate-300 hover:text-white px-3 py-2 rounded-xl bg-slate-800">Зняти всі</button>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2 sm:items-center bg-slate-950 border border-slate-800 rounded-xl p-3">
+                <label className="text-xs text-slate-400 font-bold" htmlFor="bulk-expiry">Однаковий термін придатності для відмічених без дати:</label>
+                <input id="bulk-expiry" type="date" value={bulkExpiry} onChange={e => setBulkExpiry(e.target.value)} className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                <button onClick={applyBulkExpiry} disabled={!bulkExpiry} className="text-xs font-bold text-white px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Застосувати</button>
+              </div>
+
+              <div className="space-y-3">
+                {visibleRows.length === 0 && <div className="text-center text-sm text-slate-500 py-8">Немає рядків за цим фільтром.</div>}
+                {visibleRows.map(r => {
+                  const probs = showErrors && r.selected && !r.added ? importProblems(r) : [];
+                  const badge = r.ambiguous && r.materialId ? IMPORT_BADGES.ambiguous : IMPORT_BADGES[r.kind];
+                  const expired = r.expiry && r.expiry < today;
+                  return (
+                    <div key={r.key} data-testid="import-row" className={`rounded-2xl border p-4 ${r.added ? 'opacity-50 border-teal-900 bg-slate-900' : r.selected ? 'border-teal-500/40 bg-slate-900' : 'border-slate-800 bg-slate-900/60'}`}>
+                      <div className="flex items-start gap-3">
+                        <input type="checkbox" checked={r.selected} disabled={r.added} onChange={e => patchRow(r.key, { selected: e.target.checked })} aria-label={`Додати: ${r.docName}`} className="mt-1 h-5 w-5 accent-teal-500 shrink-0" />
+                        <div className="flex-1 min-w-0 space-y-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[10px] text-slate-500 font-mono shrink-0">№{r.rowNo || '—'}</span>
+                            <input type="text" value={r.docName} disabled={r.added} onChange={e => patchRow(r.key, { docName: e.target.value })} onBlur={() => rematch(r.key)} aria-label="Назва в документі" className="flex-1 min-w-[12rem] bg-transparent border-b border-slate-800 focus:border-teal-500 text-sm text-white outline-none py-1" />
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${r.added ? 'bg-teal-500/10 text-teal-400 border-teal-500/30' : badge.cls}`}>{r.added ? 'Додано' : badge.text}</span>
+                          </div>
+                          {!r.added && <ImportMaterialPicker materials={state.materials} value={r.materialId} candidates={r.candidates} invalid={probs.includes('material')} onChange={id => patchRow(r.key, { materialId: id, kind: 'manual', ambiguous: false, selected: true })} />}
+                          {!r.added && (
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Кількість{r.unit ? `, ${r.unit}` : ''}</label>
+                                <input type="number" min="0" step="any" value={r.qty} onChange={e => patchRow(r.key, { qty: e.target.value })} aria-label="Кількість" className={inputCls(probs.includes('qty'))} />
+                                {(r.requested || r.issued) && (
+                                  <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-slate-500">
+                                    {r.requested ? <button type="button" onClick={() => patchRow(r.key, { qty: String(r.requested) })} className="underline hover:text-slate-300">вимагається {r.requested}</button> : null}
+                                    {r.issued ? <button type="button" onClick={() => patchRow(r.key, { qty: String(r.issued) })} className="underline hover:text-slate-300">відпущено {r.issued}</button> : null}
+                                  </div>
+                                )}
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">LOT / партія</label>
+                                <input type="text" value={r.lot} onChange={e => patchRow(r.key, { lot: e.target.value })} aria-label="LOT" className={inputCls(probs.includes('lot'))} />
+                              </div>
+                              <div className="col-span-2 md:col-span-1">
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Придатний до</label>
+                                <input type="date" value={r.expiry} onChange={e => patchRow(r.key, { expiry: e.target.value })} aria-label="Придатний до" className={inputCls(probs.includes('expiry'))} />
+                                {expired && <div className="mt-1 text-[10px] text-amber-400">термін уже минув</div>}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {phase === 'review' && (
+          <div className="shrink-0 border-t border-slate-800 p-4 md:p-5 space-y-3">
+            {saveError && <div role="alert" className="bg-rose-950/60 border border-rose-900 text-rose-200 text-sm rounded-xl p-3 flex gap-2"><AlertTriangle size={16} className="shrink-0 mt-0.5" /> {saveError}</div>}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <p className="text-sm text-slate-400" data-testid="import-summary">Відмічено: <span className="text-white font-bold">{chosen.length}</span> поз. · усього <span className="text-white font-bold">{totalQty}</span> шт</p>
+              <div className="flex gap-2">
+                <button onClick={onClose} className="px-5 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold">Закрити</button>
+                <button onClick={handleSubmit} disabled={isSaving || chosen.length === 0} className="px-5 py-3 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-bold disabled:opacity-40 flex items-center gap-2">{isSaving ? 'Додаю…' : 'Додати на склад'}</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      {confirmDialog}
+    </div>
+  );
+};
+
 const StockIn = ({ state, dispatch, sessionPin }) => {
+  const [showImport, setShowImport] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [formData, setFormData] = useState({ code: '', lot: '', serial: '', size: '', exp: '', quantity: 1 });
   const [message, setMessage] = useState(null);
@@ -952,10 +1305,14 @@ const StockIn = ({ state, dispatch, sessionPin }) => {
   return (
     <div className="max-w-2xl mx-auto animate-in slide-in-from-bottom-4 duration-500">
       {showScanner && <BarcodeScanner onScan={handleScan} onClose={() => setShowScanner(false)} />}
+      {showImport && <DocumentImportModal state={state} dispatch={dispatch} sessionPin={sessionPin} onClose={() => setShowImport(false)} />}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-2xl">
          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
             <h2 className="text-xl font-black text-white flex items-center gap-3"><div className="p-2 bg-teal-500/10 rounded-xl text-teal-500"><PackagePlus size={24} /></div>Прихід товару</h2>
-            <button onClick={() => setShowScanner(true)} className="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-teal-400 px-5 py-2.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors border border-slate-700"><Camera size={18} /> Сканувати</button>
+            <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+              <button onClick={() => setShowImport(true)} className="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-teal-400 px-5 py-2.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors border border-slate-700"><Upload size={18} /> Імпорт з документа</button>
+              <button onClick={() => setShowScanner(true)} className="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-teal-400 px-5 py-2.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors border border-slate-700"><Camera size={18} /> Сканувати</button>
+            </div>
          </div>
          {message && <div className={`p-4 rounded-xl border mb-6 flex items-center gap-3 text-sm font-medium ${message.type === 'error' ? 'bg-rose-950/80 border-rose-900 text-rose-200' : message.type === 'warning' ? 'bg-amber-950/80 border-amber-900 text-amber-200' : 'bg-teal-950/80 border-teal-900 text-teal-200'}`}><AlertTriangle size={18}/> {message.text}</div>}
 
@@ -1451,6 +1808,7 @@ const AUDIT_TONES = {
 // Назва, колір і належність до фільтрів для кожної дії, яку пише Code.gs (logAudit_).
 const AUDIT_ACTIONS = {
   addStock:          { label: 'Прихід',                 tone: 'teal',   groups: ['stock'] },
+  addStockBatch:     { label: 'Прихід з документа',     tone: 'teal',   groups: ['stock'] },
   addOperation:      { label: 'Списання на операцію',   tone: 'teal',   groups: ['stock'] },
   addWriteoff:       { label: 'Списання зі складу',     tone: 'amber',  groups: ['stock'] },
   deleteOperation:   { label: 'Видалення операції',     tone: 'rose',   groups: ['delete', 'stock'] },
