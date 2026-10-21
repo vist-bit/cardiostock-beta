@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
-  HeartPulse, ScanBarcode, PackagePlus, Activity, AlertTriangle, Database, Download, CheckCircle,
+  HeartPulse, PackagePlus, Activity, AlertTriangle, Database, Download, CheckCircle,
   X, Search, Trash2, Camera, Calendar, Filter, ArrowDownUp, Lock, Unlock, Edit2, Clock,
   PieChart as PieChartIcon, BarChart3, Users, Shield, ClipboardList, RefreshCw, Upload, FileText
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { fetchAllData, callAction as rawCallAction } from './appsScriptClient';
-import { parseDocumentFile, matchItem, matchItems } from './documentImport';
+import { parseDocumentFile, matchItem, matchItems, normalizeCode, suggestCode, availableBatches, isAutoAllocatable, planWriteoffRows } from './documentImport';
 
 // Сервер відповідає цим текстом (Code.gs, authorize_), коли PIN поточної сесії більше не існує:
 // адмін змінив PIN або видалив обліковий запис. Тоді сесію треба завершити, а не лишати
@@ -116,312 +116,47 @@ const useConfirm = () => {
   return [askConfirm, confirmDialog];
 };
 
-const parseBarcode = (code) => {
-  let cleanCode = code.replace(/\\u001d|\\x1d|<GS>|\]d2/gi, String.fromCharCode(29));
-  if (cleanCode.startsWith(']d2')) cleanCode = cleanCode.substring(3);
-
-  let result = { code: '', lot: '', exp: '', serial: '', raw: code };
-  let remaining = cleanCode;
-
-  try {
-    while (remaining.length > 0) {
-      if (remaining.startsWith('01') && remaining.length >= 16) {
-        result.code = remaining.substring(2, 16); remaining = remaining.substring(16);
-      } else if (remaining.startsWith('17') && remaining.length >= 8) {
-        let dateStr = remaining.substring(2, 8);
-        let year = parseInt(dateStr.substring(0, 2), 10);
-        year = (year > 50 ? 1900 + year : 2000 + year);
-        result.exp = `${year}-${dateStr.substring(2, 4)}-${dateStr.substring(4, 6)}`;
-        remaining = remaining.substring(8);
-      } else if (remaining.startsWith('10')) {
-        let nextGS = remaining.indexOf(String.fromCharCode(29));
-        if (nextGS === -1) { result.lot = remaining.substring(2); remaining = ''; }
-        else { result.lot = remaining.substring(2, nextGS); remaining = remaining.substring(nextGS + 1); }
-      } else if (remaining.startsWith('21')) {
-        let nextGS = remaining.indexOf(String.fromCharCode(29));
-        if (nextGS === -1) { result.serial = remaining.substring(2); remaining = ''; }
-        else { result.serial = remaining.substring(2, nextGS); remaining = remaining.substring(nextGS + 1); }
-      } else {
-        let nextGS = remaining.indexOf(String.fromCharCode(29));
-        if (nextGS === -1) break;
-        remaining = remaining.substring(nextGS + 1);
-      }
-    }
-  } catch (e) { console.error("Parse Error:", e); }
-
-  if (!result.code) {
-    const basicGtinMatch = cleanCode.match(/(?:01)(\d{14})/);
-    if (basicGtinMatch) result.code = basicGtinMatch[1];
-    else result.code = cleanCode;
-  }
-  return result;
-};
-
-const BarcodeScanner = ({ onScan, onClose }) => {
-  const [error, setError] = useState('');
-  const [isReady, setIsReady] = useState(false);
-
-  // Камера викликає callback на КОЖНОМУ кадрі, де бачить код, — до того, як clear() встигне
-  // її зупинити. Без захисту один скан обробляється двічі й у списанні стає +2 шт замість +1.
-  // handledRef пропускає лише перший виклик на одне відкриття сканера.
-  // onScan тримаємо в ref, щоб ефект ініціалізації камери не перезапускався на кожен ререндер батька.
-  const onScanRef = useRef(onScan);
-  const handledRef = useRef(false);
-  useEffect(() => { onScanRef.current = onScan; }, [onScan]);
-
-  const emitScan = useCallback((text) => {
-    if (handledRef.current) return false;
-    handledRef.current = true;
-    onScanRef.current(text);
-    return true;
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let html5QrcodeScanner;
-    const initScanner = () => {
-      if (cancelled) return;
-      setIsReady(true);
-      try {
-        html5QrcodeScanner = new window.Html5QrcodeScanner("reader", { fps: 30, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 }, false);
-        html5QrcodeScanner.render(
-          (decodedText) => {
-            if (!emitScan(decodedText)) return; // повторний кадр з тим самим кодом — ігноруємо
-            try { html5QrcodeScanner.clear().catch(e => console.error(e)); } catch (e) { console.error(e); }
-          },
-          (err) => {}
-        );
-      } catch (e) { setError("Не вдалося запустити камеру. Перевірте дозволи."); }
-    };
-
-    if (!window.Html5QrcodeScanner) {
-      const script = document.createElement('script');
-      script.src = 'https://unpkg.com/html5-qrcode';
-      script.async = true;
-      script.onload = initScanner;
-      script.onerror = () => setError("Не вдалося завантажити модуль сканера. Перевірте інтернет-з'єднання.");
-      document.body.appendChild(script);
-    } else { initScanner(); }
-
-    return () => {
-      cancelled = true;
-      if (html5QrcodeScanner) {
-        try { html5QrcodeScanner.clear().catch(e => console.error(e)); } catch (e) { console.error(e); }
-      }
-    };
-  }, [emitScan]);
-
-  return (
-    <div className="fixed inset-0 bg-slate-950/95 z-50 flex flex-col backdrop-blur-sm">
-      <div className="p-4 flex justify-between items-center text-white bg-slate-900 border-b border-slate-800 shadow-lg">
-        <h2 className="text-lg font-bold flex items-center gap-2"><ScanBarcode className="text-teal-400" /> Сканування коду</h2>
-        <button onClick={onClose} className="p-2 bg-slate-800 rounded-full hover:bg-slate-700 transition-colors"><X size={24} /></button>
-      </div>
-      <div className="flex-1 flex flex-col justify-center items-center p-4">
-        {error ? (
-          <div className="text-rose-400 bg-rose-400/10 p-4 rounded-xl text-center max-w-sm border border-rose-900/50"><AlertTriangle className="mx-auto mb-2" size={32} />{error}</div>
-        ) : (
-          <div className="w-full max-w-sm bg-slate-900 rounded-2xl overflow-hidden shadow-2xl relative border border-slate-700 min-h-[300px]">
-             <div id="reader" className="w-full bg-black"></div>
-             {!isReady && <div className="absolute inset-0 flex items-center justify-center text-teal-500 animate-pulse">Ініціалізація камери...</div>}
-             <div className="absolute bottom-2 left-2 right-2 bg-slate-950/90 p-3 rounded-xl text-xs text-center border border-slate-700 shadow-xl">
-                <p className="mb-2 font-bold text-teal-400">Емулятор сканера</p>
-                <div className="flex flex-col gap-2 justify-center">
-                    <button onClick={() => emitScan('01008000000000011728120110LOT-ONX-A21\x1D21SN-998877')} className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-lg text-white font-bold transition-colors">Скан: On-X GS1</button>
-                    <button onClick={() => emitScan('REF-CUSTOM-VALVE')} className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-lg text-white font-bold transition-colors">Скан: Невідомий артикул</button>
-                </div>
-             </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
+const Dashboard = ({ state, dispatch, sessionPin }) => {
   const [askConfirm, confirmDialog] = useConfirm();
   const [selectedOp, setSelectedOp] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [period, setPeriod] = useState(30);
-  const [trendMetric, setTrendMetric] = useState('units');
-  const [categoryFilter, setCategoryFilter] = useState('');
-  const [search, setSearch] = useState('');
-  const [stockFilter, setStockFilter] = useState('all');
-  const [sortBy, setSortBy] = useState('deficit');
-  const [page, setPage] = useState(1);
-  const [alertFilter, setAlertFilter] = useState('');
 
-  const today = new Date();
-  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  const dayStart = new Date(`${todayKey}T00:00:00`);
-  const dateKey = (value) => {
-    if (!value) return '';
-    const raw = String(value);
-    if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
-    const parsed = new Date(raw);
-    if (Number.isNaN(parsed.getTime())) return '';
-    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
-  };
-  const displayDate = (value) => {
-    const key = dateKey(value);
-    if (!key) return '—';
-    const [y, m, d] = key.split('-');
-    return `${d}.${m}.${y}`;
-  };
-  const qty = (value) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-  };
-  const goTo = (tab) => { if (setActiveTab) setActiveTab(tab); };
-  const daysFromToday = (value) => {
-    const key = dateKey(value);
-    if (!key) return null;
-    return Math.floor((new Date(`${key}T00:00:00`).getTime() - dayStart.getTime()) / 86400000);
-  };
+  const totalItems = state.stock.reduce((sum, item) => sum + item.quantity, 0);
 
-  const stockByMaterial = useMemo(() => {
-    const map = new Map();
-    state.materials.forEach(material => map.set(material.id, {
-      material, total: 0, usable: 0, expired: 0, expiring: 0, missingExpiry: 0, batches: 0
-    }));
+  const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const operationsLast30Days = state.operations.filter(op => new Date(op.operation_date) >= thirtyDaysAgo).length;
+
+  const thirtyDaysFuture = new Date(); thirtyDaysFuture.setDate(thirtyDaysFuture.getDate() + 30);
+  const expiringItems = state.stock.filter(item => new Date(item.expiration_date) <= thirtyDaysFuture && item.quantity > 0);
+  const lowStockItems = state.materials.filter(mat => {
+    const totalQty = state.stock.filter(s => s.material_id === mat.id).reduce((sum, s) => sum + s.quantity, 0);
+    return totalQty < mat.min_stock;
+  });
+
+  const pieData = useMemo(() => {
+    const categories = {};
     state.stock.forEach(batch => {
-      const row = map.get(batch.material_id);
-      if (!row) return;
-      const amount = Math.max(0, qty(batch.quantity));
-      row.total += amount;
-      if (amount <= 0) return;
-      row.batches += 1;
-      const days = daysFromToday(batch.expiration_date);
-      if (days === null) row.missingExpiry += amount;
-      else if (days < 0) row.expired += amount;
-      else {
-        row.usable += amount;
-        if (days <= 30) row.expiring += amount;
-      }
+       if (batch.quantity <= 0) return;
+       const mat = state.materials.find(m => m.id === batch.material_id);
+       if (!mat) return;
+       categories[mat.subcategory] = (categories[mat.subcategory] || 0) + batch.quantity;
     });
-    return map;
-  }, [state.materials, state.stock, todayKey]);
+    return Object.entries(categories).map(([name, value]) => ({ name, value })).filter(d => d.value > 0).sort((a,b)=>b.value - a.value);
+  }, [state.stock, state.materials]);
 
-  const materialRows = useMemo(() => Array.from(stockByMaterial.values()).map(row => {
-    const minimum = Math.max(0, qty(row.material.min_stock));
-    return { ...row, minimum, deficit: Math.max(0, minimum - row.usable), isLow: row.usable < minimum };
-  }), [stockByMaterial]);
+  const COLORS = ['#0d9488', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899', '#64748b'];
 
-  const usableTotal = materialRows.reduce((sum, row) => sum + row.usable, 0);
-  const totalRecorded = materialRows.reduce((sum, row) => sum + row.total, 0);
-  const lowStockItems = materialRows.filter(row => row.isLow && row.minimum > 0);
-  const zeroStockItems = materialRows.filter(row => row.usable <= 0 && row.minimum > 0);
-  const expiredBatches = state.stock.filter(batch => qty(batch.quantity) > 0 && daysFromToday(batch.expiration_date) !== null && daysFromToday(batch.expiration_date) < 0);
-  const expiringBatches = state.stock.filter(batch => {
-    const days = daysFromToday(batch.expiration_date);
-    return qty(batch.quantity) > 0 && days !== null && days >= 0 && days <= 30;
-  });
-  const missingExpiryBatches = state.stock.filter(batch => qty(batch.quantity) > 0 && !dateKey(batch.expiration_date));
-
-  const cutoff = new Date(dayStart);
-  cutoff.setDate(cutoff.getDate() - (period - 1));
-  const operationsInPeriod = state.operations.filter(op => {
-    const key = dateKey(op.operation_date);
-    return key && new Date(`${key}T00:00:00`) >= cutoff && new Date(`${key}T00:00:00`) <= dayStart;
-  });
-
-  const expenseRecords = useMemo(() => state.expenses.map(expense => {
-    const operation = state.operations.find(op => op.id === expense.operation_id);
-    const batch = state.stock.find(item => item.id === expense.stock_batch_id) ||
-      state.writeoffs.find(item => item.id === expense.stock_batch_id);
-    const material = state.materials.find(item => item.id === batch?.material_id);
-    const date = dateKey(expense.created_at) || dateKey(operation?.operation_date);
-    return { ...expense, operation, batch, material, date, amount: Math.max(0, qty(expense.quantity)) };
-  }), [state.expenses, state.operations, state.stock, state.writeoffs, state.materials]);
-
-  const trendData = useMemo(() => {
-    const result = [];
-    for (let offset = period - 1; offset >= 0; offset -= 1) {
-      const date = new Date(dayStart);
-      date.setDate(date.getDate() - offset);
-      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-      result.push({ key, label: `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}`, units: 0, operations: 0 });
-    }
-    const byDate = new Map(result.map(row => [row.key, row]));
-    if (trendMetric === 'operations') {
-      state.operations.forEach(op => {
-        const row = byDate.get(dateKey(op.operation_date));
-        if (row) row.operations += 1;
-      });
-    } else {
-      expenseRecords.forEach(expense => {
-        const row = byDate.get(expense.date);
-        if (row) row.units += expense.amount;
-      });
-    }
-    return result;
-  }, [period, trendMetric, state.operations, expenseRecords, todayKey]);
-
-  const categoryData = useMemo(() => {
-    const categories = new Map();
-    expenseRecords.forEach(expense => {
-      if (!expense.date || expense.date < dateKey(cutoff) || expense.date > todayKey || expense.amount <= 0) return;
-      const name = expense.material?.subcategory || 'Без категорії';
-      categories.set(name, (categories.get(name) || 0) + expense.amount);
+  const barData = useMemo(() => {
+    const months = {};
+    state.operations.forEach(op => {
+      const month = op.operation_date.substring(0, 7);
+      months[month] = (months[month] || 0) + 1;
     });
-    return Array.from(categories, ([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value);
-  }, [expenseRecords, period, todayKey]);
-
-  const alerts = useMemo(() => {
-    const list = [];
-    expiredBatches.forEach(batch => {
-      const material = state.materials.find(item => item.id === batch.material_id);
-      list.push({ key: `expired-${batch.id}`, type: 'expired', title: material?.name || 'Невідомий матеріал', detail: `Партія ${batch.lot_number || 'без LOT'} · прострочена ${displayDate(batch.expiration_date)}`, quantity: qty(batch.quantity), priority: 0 });
-    });
-    zeroStockItems.forEach(row => list.push({ key: `zero-${row.material.id}`, type: 'zero', title: row.material.name, detail: `Доступно 0 · мінімум ${row.minimum}`, quantity: 0, priority: 1 }));
-    lowStockItems.filter(row => row.usable > 0).forEach(row => list.push({ key: `low-${row.material.id}`, type: 'low', title: row.material.name, detail: `Доступно ${row.usable} · мінімум ${row.minimum}`, quantity: row.deficit, priority: 2 }));
-    expiringBatches.forEach(batch => {
-      const material = state.materials.find(item => item.id === batch.material_id);
-      list.push({ key: `expiring-${batch.id}`, type: 'expiring', title: material?.name || 'Невідомий матеріал', detail: `LOT ${batch.lot_number || '—'} · придатний до ${displayDate(batch.expiration_date)}`, quantity: qty(batch.quantity), priority: 3 });
-    });
-    missingExpiryBatches.forEach(batch => {
-      const material = state.materials.find(item => item.id === batch.material_id);
-      list.push({ key: `missing-${batch.id}`, type: 'missing', title: material?.name || 'Невідомий матеріал', detail: `LOT ${batch.lot_number || '—'} · не вказано термін придатності`, quantity: qty(batch.quantity), priority: 4 });
-    });
-    return list.sort((a, b) => a.priority - b.priority).slice(0, 12);
-  }, [state.stock, state.materials, expiredBatches, expiringBatches, missingExpiryBatches, lowStockItems, zeroStockItems, todayKey]);
-
-  const filteredMaterials = useMemo(() => {
-    let rows = materialRows.filter(row => {
-      const term = search.trim().toLocaleLowerCase('uk-UA');
-      if (term && !`${row.material.name} ${row.material.code || ''} ${row.material.subcategory || ''}`.toLocaleLowerCase('uk-UA').includes(term)) return false;
-      if (stockFilter === 'deficit' && !(row.isLow && row.minimum > 0)) return false;
-      if (stockFilter === 'zero' && !(row.usable <= 0 && row.minimum > 0)) return false;
-      if (categoryFilter && (row.material.subcategory || 'Без категорії') !== categoryFilter) return false;
-      if (alertFilter === 'expired' && row.expired <= 0) return false;
-      if (alertFilter === 'expiring' && row.expiring <= 0) return false;
-      if (alertFilter === 'missing' && row.missingExpiry <= 0) return false;
-      if (alertFilter === 'zero' && !(row.usable <= 0 && row.minimum > 0)) return false;
-      if (alertFilter === 'low' && !(row.isLow && row.minimum > 0)) return false;
-      return true;
-    });
-    rows = rows.slice().sort((a, b) => {
-      if (sortBy === 'name') return String(a.material.name || '').localeCompare(String(b.material.name || ''), 'uk');
-      if (sortBy === 'available') return a.usable - b.usable;
-      return b.deficit - a.deficit || String(a.material.name || '').localeCompare(String(b.material.name || ''), 'uk');
-    });
-    return rows;
-  }, [materialRows, search, stockFilter, categoryFilter, sortBy, alertFilter]);
-
-  useEffect(() => { setPage(1); }, [search, stockFilter, categoryFilter, sortBy, alertFilter]);
-  const pageSize = 8;
-  const pageCount = Math.max(1, Math.ceil(filteredMaterials.length / pageSize));
-  const visibleMaterials = filteredMaterials.slice((page - 1) * pageSize, page * pageSize);
-
-  const recentOperations = state.operations.slice().sort((a, b) => {
-    const dateA = new Date(a.created_at || a.operation_date).getTime() || 0;
-    const dateB = new Date(b.created_at || b.operation_date).getTime() || 0;
-    return dateB - dateA;
-  }).slice(0, 5);
+    return Object.entries(months).map(([name, value]) => ({ name, value })).sort((a,b) => a.name.localeCompare(b.name)).slice(-6);
+  }, [state.operations]);
 
   const handleDeleteOp = async () => {
-    if (!selectedOp || isDeleting) return;
+    if (isDeleting) return;
     const linesCount = state.expenses.filter(e => e.operation_id === selectedOp.id).length;
     const confirmed = await askConfirm({
       title: `Видалити операцію ${selectedOp.operation_num}?`,
@@ -432,174 +167,134 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
     setIsDeleting(true);
     try {
       const result = await callAction('deleteOperation', { operationId: selectedOp.id }, sessionPin);
-      if (!result?.success) { alert(result?.error || 'Помилка видалення операції.'); return; }
+      if (!result.success) { alert(result.error || "Помилка видалення операції."); return; }
+
       dispatch({ type: 'DELETE_OPERATION', payload: selectedOp.id });
       setSelectedOp(null);
-    } catch (error) {
-      console.error(error);
+    } catch (e) {
+      console.error(e);
       alert("Помилка видалення операції: немає з'єднання з сервером.");
     } finally {
       setIsDeleting(false);
     }
   };
 
-  const cardClass = 'rounded-2xl border p-5 shadow-lg transition-colors';
-  const panelClass = 'bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl';
-  const unitTotal = trendData.reduce((sum, row) => sum + row.units, 0);
-  const operationTotal = trendData.reduce((sum, row) => sum + row.operations, 0);
-  const alertCount = expiredBatches.length + expiringBatches.length + missingExpiryBatches.length + zeroStockItems.length + lowStockItems.filter(row => row.usable > 0).length;
-
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-[0.2em] text-teal-400 font-bold">CardioStock · Контроль ризиків</p>
-          <h2 className="text-2xl md:text-3xl font-black text-white mt-1">Огляд відділення</h2>
-          <p className="text-sm text-slate-400 mt-1">Склад, списання та операційна активність на основі наявних записів.</p>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700 p-5 rounded-3xl shadow-lg relative overflow-hidden">
+          <div className="absolute top-0 right-0 p-4 opacity-10"><Database size={64}/></div>
+          <div className="flex items-center gap-3 text-slate-400 mb-2 relative z-10"><Database className="text-teal-400" size={18} /><h3 className="font-semibold text-xs uppercase tracking-widest">Загальний залишок</h3></div>
+          <div className="text-3xl font-black text-white relative z-10 tracking-tight">{totalItems} <span className="text-lg text-slate-500 font-medium">шт</span></div>
+          <p className="text-xs text-slate-400 mt-2 relative z-10"><span className="text-teal-400 font-bold">{operationsLast30Days}</span> операцій за останні 30 днів</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button onClick={() => goTo('stockin')} className="px-4 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-sm font-bold flex items-center gap-2"><PackagePlus size={16}/> Оприбуткувати</button>
-          <button onClick={() => goTo('postop')} className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-sm font-bold flex items-center gap-2"><Activity size={16}/> Списати після операції</button>
+        <div className={`border p-5 rounded-3xl shadow-lg relative overflow-hidden ${expiringItems.length > 0 ? 'bg-gradient-to-br from-rose-950 to-slate-900 border-rose-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'}`}>
+          <div className="absolute top-0 right-0 p-4 opacity-10"><Calendar size={64} className={expiringItems.length > 0 ? 'text-rose-500' : 'text-slate-500'}/></div>
+          <div className="flex items-center gap-3 text-slate-400 mb-2 relative z-10"><Calendar className={expiringItems.length > 0 ? 'text-rose-400' : 'text-slate-400'} size={18} /><h3 className="font-semibold text-xs uppercase tracking-widest text-slate-300">FEFO Контроль</h3></div>
+          <div className={`text-3xl font-black tracking-tight relative z-10 ${expiringItems.length > 0 ? 'text-rose-400' : 'text-white'}`}>{expiringItems.length} <span className="text-sm text-slate-400 font-medium tracking-normal">партіям &lt; 30 днів</span></div>
+        </div>
+        <div className={`border p-5 rounded-3xl shadow-lg relative overflow-hidden ${lowStockItems.length > 0 ? 'bg-gradient-to-br from-amber-950 to-slate-900 border-amber-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'}`}>
+          <div className="absolute top-0 right-0 p-4 opacity-10"><AlertTriangle size={64} className={lowStockItems.length > 0 ? 'text-amber-500' : 'text-slate-500'}/></div>
+          <div className="flex items-center gap-3 text-slate-400 mb-2 relative z-10"><AlertTriangle className={lowStockItems.length > 0 ? 'text-amber-400' : 'text-slate-400'} size={18} /><h3 className="font-semibold text-xs uppercase tracking-widest text-slate-300">Дефіцит</h3></div>
+          <div className={`text-3xl font-black tracking-tight relative z-10 ${lowStockItems.length > 0 ? 'text-amber-400' : 'text-white'}`}>{lowStockItems.length} <span className="text-sm text-slate-400 font-medium tracking-normal">позицій &lt; норми</span></div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <button onClick={() => { setAlertFilter(''); setStockFilter('all'); goTo('inventory'); }} className={`${cardClass} text-left bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700 hover:border-teal-600`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Доступний залишок</span><Database size={19} className="text-teal-400"/></div>
-          <div className="text-3xl font-black text-white mt-3">{usableTotal.toLocaleString('uk-UA')} <span className="text-sm font-semibold text-slate-400">од.</span></div>
-          <p className="text-xs text-slate-500 mt-2">Без прострочених партій і партій без дати придатності</p>
-        </button>
-        <button onClick={() => { setAlertFilter('expired'); document.getElementById('dashboard-alerts')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiredBatches.length ? 'bg-rose-950/50 border-rose-900' : 'bg-slate-900 border-slate-800'} hover:border-rose-700`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Прострочені партії</span><AlertTriangle size={19} className="text-rose-400"/></div>
-          <div className="text-3xl font-black text-rose-300 mt-3">{expiredBatches.length}</div>
-          <p className="text-xs text-slate-400 mt-2">Партії з позитивним залишком</p>
-        </button>
-        <button onClick={() => { setAlertFilter('expiring'); document.getElementById('dashboard-alerts')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiringBatches.length ? 'bg-amber-950/40 border-amber-900' : 'bg-slate-900 border-slate-800'} hover:border-amber-700`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Придатність ≤ 30 днів</span><Calendar size={19} className="text-amber-400"/></div>
-          <div className="text-3xl font-black text-amber-300 mt-3">{expiringBatches.length}</div>
-          <p className="text-xs text-slate-400 mt-2">Включно з партіями, термін яких спливає сьогодні</p>
-        </button>
-        <button onClick={() => { setStockFilter('deficit'); setAlertFilter(''); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${lowStockItems.length ? 'bg-amber-950/30 border-amber-900/80' : 'bg-slate-900 border-slate-800'} hover:border-amber-700`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Дефіцит</span><Activity size={19} className="text-amber-400"/></div>
-          <div className="text-3xl font-black text-amber-300 mt-3">{lowStockItems.length}</div>
-          <p className="text-xs text-slate-400 mt-2">Позицій нижче мінімального запасу</p>
-        </button>
-      </div>
-
-      <div id="dashboard-alerts" className={panelClass}>
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-          <div><h3 className="text-base font-bold text-white flex items-center gap-2"><AlertTriangle size={18} className="text-amber-400"/> Центр ризиків</h3><p className="text-xs text-slate-500 mt-1">{alertCount} типів/випадків ризику за поточними даними</p></div>
-          {alertFilter && <button onClick={() => setAlertFilter('')} className="text-xs font-bold text-teal-400 hover:text-teal-300">Очистити фільтр</button>}
-        </div>
-        {alerts.length ? <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-          {alerts.map(alert => <button key={alert.key} onClick={() => { setAlertFilter(alert.type); setStockFilter('all'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="text-left rounded-xl border border-slate-800 bg-slate-950/60 hover:bg-slate-800/70 px-4 py-3 flex items-start gap-3">
-            <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${alert.type === 'expired' || alert.type === 'zero' ? 'bg-rose-400' : alert.type === 'low' || alert.type === 'expiring' ? 'bg-amber-400' : 'bg-sky-400'}`}/>
-            <span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-100">{alert.title}</span><span className="block text-xs text-slate-400 mt-1">{alert.detail}</span></span>
-            <span className="text-xs font-bold text-slate-300 whitespace-nowrap">{alert.quantity} од.</span>
-          </button>)}
-        </div> : <div className="rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-4 text-sm text-emerald-300 flex items-center gap-2"><CheckCircle size={18}/> Критичних складських попереджень за наявними даними не виявлено.</div>}
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
-        <div className={`${panelClass} xl:col-span-3`}>
-          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
-            <div><h3 className="text-base font-bold text-white flex items-center gap-2"><BarChart3 size={18} className="text-teal-400"/> Динаміка списань</h3><p className="text-xs text-slate-500 mt-1">За датою списання; якщо її немає — за датою операції</p></div>
-            <div className="flex flex-wrap gap-2">
-              <select value={period} onChange={event => setPeriod(Number(event.target.value))} className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200"><option value={7}>7 днів</option><option value={30}>30 днів</option><option value={90}>90 днів</option></select>
-              <select value={trendMetric} onChange={event => setTrendMetric(event.target.value)} className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200"><option value="units">Кількість списаних одиниць</option><option value="operations">Кількість операцій</option></select>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl">
+            <h3 className="text-sm font-bold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2"><PieChartIcon className="text-teal-500" size={18}/> Розподіл залишків (шт)</h3>
+            <div className="h-64">
+              {pieData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={pieData} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
+                      {pieData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                    </Pie>
+                    <Tooltip formatter={(value) => value + ' шт'} contentStyle={{backgroundColor: '#0f172a', borderColor: '#1e293b', color: '#fff'}} itemStyle={{color: '#fff'}}/>
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : <div className="h-full flex items-center justify-center text-slate-600">Склад порожній</div>}
             </div>
-          </div>
-          <div className="flex gap-5 mb-3">
-            <div><p className="text-xs text-slate-500">{trendMetric === 'units' ? 'Списано за період' : 'Операцій за період'}</p><p className="text-xl font-black text-white">{trendMetric === 'units' ? unitTotal.toLocaleString('uk-UA') : operationTotal.toLocaleString('uk-UA')}</p></div>
-            <div><p className="text-xs text-slate-500">Операцій за період</p><p className="text-xl font-black text-teal-300">{operationsInPeriod.length}</p></div>
-          </div>
-          <div className="h-64">
-            {trendData.some(row => trendMetric === 'units' ? row.units > 0 : row.operations > 0) ? <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={trendData} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false}/>
-                <XAxis dataKey="label" stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} interval={period === 90 ? 8 : period === 30 ? 4 : 0}/>
-                <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false}/>
-                <Tooltip labelFormatter={(label, payload) => payload?.[0]?.payload?.key || label} formatter={value => [value, trendMetric === 'units' ? 'Одиниць' : 'Операцій']} contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff', borderRadius: 12 }}/>
-                <Bar dataKey={trendMetric} name={trendMetric === 'units' ? 'Списано' : 'Операції'} fill="#14b8a6" radius={[4, 4, 0, 0]}/>
-              </BarChart>
-            </ResponsiveContainer> : <div className="h-full flex flex-col items-center justify-center text-slate-500 gap-2"><BarChart3 size={28} className="opacity-40"/><span className="text-sm">За цей період немає записів для графіка</span></div>}
-          </div>
-        </div>
-
-        <div className={`${panelClass} xl:col-span-2`}>
-          <div className="mb-4"><h3 className="text-base font-bold text-white flex items-center gap-2"><PieChartIcon size={18} className="text-sky-400"/> Списання за категоріями</h3><p className="text-xs text-slate-500 mt-1">Натисніть категорію, щоб відфільтрувати таблицю дефіциту</p></div>
-          {categoryData.length ? <div className="space-y-3">
-            {categoryData.slice(0, 7).map((entry, index) => {
-              const max = categoryData[0]?.value || 1;
-              const colors = ['bg-teal-400', 'bg-sky-400', 'bg-violet-400', 'bg-amber-400', 'bg-pink-400', 'bg-indigo-400', 'bg-cyan-400'];
-              return <button key={entry.name} onClick={() => { setCategoryFilter(current => current === entry.name ? '' : entry.name); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`w-full text-left rounded-lg p-2 transition-colors ${categoryFilter === entry.name ? 'bg-slate-800' : 'hover:bg-slate-800/50'}`}>
-                <div className="flex justify-between gap-3 text-xs mb-1.5"><span className="text-slate-300 truncate">{entry.name}</span><span className="text-white font-bold">{entry.value.toLocaleString('uk-UA')} од.</span></div>
-                <div className="h-2 rounded-full bg-slate-800 overflow-hidden"><div className={`h-full rounded-full ${colors[index % colors.length]}`} style={{ width: `${Math.max(2, entry.value / max * 100)}%` }}/></div>
-              </button>;
-            })}
-            {categoryFilter && <button onClick={() => setCategoryFilter('')} className="text-xs text-teal-400 hover:text-teal-300 font-bold">Очистити категорію</button>}
-          </div> : <div className="h-48 flex items-center justify-center text-sm text-slate-500">Немає списань за обраний період</div>}
-        </div>
+         </div>
+         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl">
+            <h3 className="text-sm font-bold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2"><BarChart3 className="text-teal-500" size={18}/> Динаміка операцій (останні 6 міс)</h3>
+            <div className="h-64">
+              {barData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={barData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                    <XAxis dataKey="name" stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
+                    <Tooltip cursor={{fill: '#1e293b'}} formatter={(value) => value + ' опер.'} contentStyle={{backgroundColor: '#0f172a', borderColor: '#1e293b', color: '#fff'}}/>
+                    <Bar dataKey="value" fill="#0d9488" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : <div className="h-full flex items-center justify-center text-slate-600">Немає проведених операцій</div>}
+            </div>
+         </div>
       </div>
 
-      <div id="dashboard-shortages" className={panelClass}>
-        <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
-          <div><h3 className="text-base font-bold text-white flex items-center gap-2"><Database size={18} className="text-amber-400"/> Контроль залишків і дефіциту</h3><p className="text-xs text-slate-500 mt-1">Доступний залишок враховує лише партії з чинною датою придатності.</p></div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-            <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Пошук матеріалу або коду" className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 min-w-0"/>
-            <select value={stockFilter} onChange={event => setStockFilter(event.target.value)} className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200"><option value="all">Усі позиції</option><option value="deficit">Нижче мінімуму</option><option value="zero">Нульовий доступний залишок</option></select>
-            <select value={sortBy} onChange={event => setSortBy(event.target.value)} className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200"><option value="deficit">Сортувати: дефіцит</option><option value="available">Сортувати: доступний залишок</option><option value="name">Сортувати: назва</option></select>
-            {(categoryFilter || alertFilter || stockFilter !== 'all' || search) && <button onClick={() => { setCategoryFilter(''); setAlertFilter(''); setStockFilter('all'); setSearch(''); }} className="px-3 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs font-bold">Скинути фільтри</button>}
-          </div>
-        </div>
-        {(categoryFilter || alertFilter) && <div className="flex flex-wrap gap-2 mb-3">
-          {categoryFilter && <span className="text-xs rounded-full bg-teal-900/40 text-teal-300 px-3 py-1">Категорія: {categoryFilter}</span>}
-          {alertFilter && <span className="text-xs rounded-full bg-amber-900/40 text-amber-300 px-3 py-1">Ризик: {({ expired: 'прострочені партії', expiring: 'закінчується термін', missing: 'без терміну придатності', zero: 'нульовий залишок', low: 'дефіцит' })[alertFilter] || alertFilter}</span>}
-        </div>}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl">
+        <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Activity size={20} className="text-teal-500" /> Останні проведені операції</h3>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left min-w-[700px]">
-            <thead className="text-[10px] uppercase tracking-widest text-slate-400 bg-slate-950"><tr><th className="px-3 py-3 rounded-tl-lg">Матеріал</th><th className="px-3 py-3">Категорія</th><th className="px-3 py-3 text-right">Доступно</th><th className="px-3 py-3 text-right">Мінімум</th><th className="px-3 py-3 text-right">Дефіцит</th><th className="px-3 py-3">Стан</th></tr></thead>
-            <tbody className="divide-y divide-slate-800">
-              {visibleMaterials.map(row => <tr key={row.material.id} className="hover:bg-slate-800/40">
-                <td className="px-3 py-3"><div className="font-semibold text-slate-100">{row.material.name}</div><div className="text-[10px] text-slate-500 font-mono">{row.material.code || 'Без коду'}</div></td>
-                <td className="px-3 py-3 text-slate-400">{row.material.subcategory || 'Без категорії'}</td>
-                <td className="px-3 py-3 text-right font-bold text-white">{row.usable.toLocaleString('uk-UA')}</td>
-                <td className="px-3 py-3 text-right text-slate-400">{row.minimum.toLocaleString('uk-UA')}</td>
-                <td className={`px-3 py-3 text-right font-black ${row.deficit > 0 ? 'text-amber-300' : 'text-emerald-300'}`}>{row.deficit.toLocaleString('uk-UA')}</td>
-                <td className="px-3 py-3">{row.expired > 0 ? <span className="text-[10px] rounded-full bg-rose-950 text-rose-300 px-2 py-1">Є прострочене</span> : row.missingExpiry > 0 ? <span className="text-[10px] rounded-full bg-sky-950 text-sky-300 px-2 py-1">Немає терміну</span> : row.isLow && row.minimum > 0 ? <span className="text-[10px] rounded-full bg-amber-950 text-amber-300 px-2 py-1">Дефіцит</span> : row.expiring > 0 ? <span className="text-[10px] rounded-full bg-orange-950 text-orange-300 px-2 py-1">Скоро спливає</span> : <span className="text-[10px] rounded-full bg-emerald-950 text-emerald-300 px-2 py-1">У нормі</span>}</td>
-              </tr>)}
-              {!visibleMaterials.length && <tr><td colSpan="6" className="px-4 py-10 text-center text-slate-500">За цими фільтрами позицій не знайдено.</td></tr>}
+          <table className="w-full text-sm text-left"><thead className="text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-950"><tr><th className="px-4 py-3 rounded-tl-xl">Дата</th><th className="px-4 py-3">№ Опер.</th><th className="px-4 py-3">Пацієнт (ІБ)</th><th className="px-4 py-3 rounded-tr-xl">Тип</th></tr></thead>
+            <tbody className="divide-y divide-slate-800 text-slate-300">
+              {state.operations.slice().sort((a,b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 5).map(op => (
+                <tr key={op.id} onClick={() => setSelectedOp(op)} className="hover:bg-slate-800/50 transition-colors cursor-pointer group">
+                  <td className="px-4 py-4 whitespace-nowrap">{new Date(op.operation_date).toLocaleDateString('uk-UA')}</td>
+                  <td className="px-4 py-4 font-mono text-teal-400 font-bold group-hover:text-teal-300">{op.operation_num}</td>
+                  <td className="px-4 py-4 font-medium">{op.patient_case_id}</td>
+                  <td className="px-4 py-4 text-slate-400">{op.operation_type}</td>
+                </tr>
+              ))}
+              {state.operations.length === 0 && <tr><td colSpan="4" className="px-4 py-12 text-center text-slate-500">Історія операцій порожня</td></tr>}
             </tbody>
           </table>
         </div>
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mt-4">
-          <p className="text-xs text-slate-500">Позицій: {filteredMaterials.length} · Загальний облікований залишок: {totalRecorded.toLocaleString('uk-UA')} од.</p>
-          <div className="flex items-center gap-2"><button disabled={page <= 1} onClick={() => setPage(value => Math.max(1, value - 1))} className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 disabled:opacity-40 text-xs">Назад</button><span className="text-xs text-slate-400">Сторінка {Math.min(page, pageCount)} з {pageCount}</span><button disabled={page >= pageCount} onClick={() => setPage(value => Math.min(pageCount, value + 1))} className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 disabled:opacity-40 text-xs">Далі</button></div>
-        </div>
       </div>
 
-      <div className={panelClass}>
-        <div className="flex items-center justify-between mb-4"><div><h3 className="text-base font-bold text-white flex items-center gap-2"><Activity size={18} className="text-teal-400"/> Останні операції</h3><p className="text-xs text-slate-500 mt-1">Відкрийте запис, щоб переглянути списані матеріали</p></div><button onClick={() => goTo('postop')} className="text-xs font-bold text-teal-400 hover:text-teal-300">Перейти до списання →</button></div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left min-w-[580px]"><thead className="text-[10px] uppercase tracking-widest text-slate-400 bg-slate-950"><tr><th className="px-3 py-3">Дата</th><th className="px-3 py-3">№ операції</th><th className="px-3 py-3">ІБ пацієнта</th><th className="px-3 py-3">Тип втручання</th></tr></thead><tbody className="divide-y divide-slate-800 text-slate-300">
-            {recentOperations.map(op => <tr key={op.id} onClick={() => setSelectedOp(op)} className="cursor-pointer hover:bg-slate-800/50"><td className="px-3 py-3 whitespace-nowrap">{displayDate(op.operation_date)}</td><td className="px-3 py-3 font-mono font-bold text-teal-300">{op.operation_num || '—'}</td><td className="px-3 py-3">{op.patient_case_id || '—'}</td><td className="px-3 py-3">{op.operation_type || '—'}</td></tr>)}
-            {!recentOperations.length && <tr><td colSpan="4" className="px-4 py-10 text-center text-slate-500">Історія операцій порожня.</td></tr>}
-          </tbody></table>
-        </div>
-      </div>
-
-      {selectedOp && <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex justify-center items-center p-4" onClick={() => !isDeleting && setSelectedOp(null)}>
-        <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden" onClick={event => event.stopPropagation()}>
-          <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-950"><h3 className="text-lg font-bold text-white flex items-center gap-2"><Activity className="text-teal-500"/> Операція {selectedOp.operation_num || ''}</h3><button onClick={() => setSelectedOp(null)} className="text-slate-400 hover:text-white bg-slate-800 p-2 rounded-full" aria-label="Закрити"><X size={18}/></button></div>
-          <div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4 text-sm"><div><p className="text-slate-500 text-xs uppercase mb-1">Дата</p><p className="font-bold text-white">{displayDate(selectedOp.operation_date)}</p></div><div><p className="text-slate-500 text-xs uppercase mb-1">ІБ пацієнта</p><p className="font-bold text-white">{selectedOp.patient_case_id || '—'}</p></div><div className="col-span-2"><p className="text-slate-500 text-xs uppercase mb-1">Тип втручання</p><p className="font-bold text-white">{selectedOp.operation_type || '—'}</p></div></div>
-            <div className="pt-4 border-t border-slate-800"><p className="text-slate-500 text-xs uppercase mb-3 font-bold">Списані матеріали</p><div className="space-y-2 max-h-48 overflow-y-auto">
-              {state.expenses.filter(expense => expense.operation_id === selectedOp.id).map(expense => { const batch = state.stock.find(item => item.id === expense.stock_batch_id) || state.writeoffs.find(item => item.id === expense.stock_batch_id); const material = state.materials.find(item => item.id === batch?.material_id); return <div key={expense.id} className="flex justify-between gap-3 items-center bg-slate-950 p-3 rounded-xl border border-slate-800"><div><p className="text-sm font-bold text-white">{material?.name || 'Невідомий матеріал'}</p><p className="text-[10px] text-slate-400 mt-1">LOT: {batch?.lot_number || '—'} {batch?.size ? `· Розмір: ${batch.size}` : ''}</p></div><span className="font-black text-teal-400 whitespace-nowrap">{qty(expense.quantity)} од.</span></div>; })}
-              {!state.expenses.some(expense => expense.operation_id === selectedOp.id) && <p className="text-sm text-slate-500">Для цієї операції немає записів списання.</p>}
-            </div></div>
+      {selectedOp && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex justify-center items-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
+             <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-950">
+                <h3 className="text-lg font-bold text-white flex items-center gap-2"><Activity className="text-teal-500"/> Деталі операції {selectedOp.operation_num}</h3>
+                <button onClick={()=>setSelectedOp(null)} className="text-slate-400 hover:text-white bg-slate-800 p-2 rounded-full"><X size={18}/></button>
+             </div>
+             <div className="p-6 space-y-4">
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                   <div><p className="text-slate-500 text-xs uppercase tracking-widest mb-1">Дата</p><p className="font-bold text-white">{new Date(selectedOp.operation_date).toLocaleDateString('uk-UA')}</p></div>
+                   <div><p className="text-slate-500 text-xs uppercase tracking-widest mb-1">ІБ Пацієнта</p><p className="font-bold text-white">{selectedOp.patient_case_id}</p></div>
+                   <div className="col-span-2"><p className="text-slate-500 text-xs uppercase tracking-widest mb-1">Тип втручання</p><p className="font-bold text-white">{selectedOp.operation_type}</p></div>
+                </div>
+                <div className="mt-4 pt-4 border-t border-slate-800">
+                   <p className="text-slate-500 text-xs uppercase tracking-widest mb-3 font-bold">Списані матеріали</p>
+                   <div className="space-y-2 max-h-48 overflow-y-auto pr-2">
+                      {state.expenses.filter(e => e.operation_id === selectedOp.id).map(exp => {
+                         const batch = state.stock.find(s => s.id === exp.stock_batch_id) || state.writeoffs.find(w=>w.id === exp.stock_batch_id);
+                         const mat = state.materials.find(m => m.id === batch?.material_id);
+                         return (
+                           <div key={exp.id} className="flex justify-between items-center bg-slate-950 p-3 rounded-xl border border-slate-800">
+                             <div>
+                               <p className="text-sm font-bold text-white">{mat?.name || 'Невідомий матеріал'}</p>
+                               <div className="flex gap-2 items-center mt-1">
+                                  {batch?.size && <span className="text-[10px] bg-teal-900/30 text-teal-400 px-1.5 rounded font-bold">Р: {batch.size}</span>}
+                                  <span className="text-[10px] text-slate-400 font-mono">LOT: {batch?.lot_number || '-'}</span>
+                               </div>
+                             </div>
+                             <div className="font-black text-teal-400">{exp.quantity} шт</div>
+                           </div>
+                         )
+                      })}
+                   </div>
+                </div>
+             </div>
+             <div className="p-5 border-t border-slate-800 bg-slate-950/50 flex gap-3">
+                <button onClick={handleDeleteOp} disabled={isDeleting} className="flex-1 bg-rose-950 text-rose-400 hover:bg-rose-900 hover:text-white py-3 rounded-xl font-bold flex justify-center items-center gap-2 transition-colors border border-rose-900/50 disabled:opacity-50 disabled:cursor-not-allowed"><Trash2 size={18}/> {isDeleting ? 'Видалення...' : 'Скасувати та видалити'}</button>
+             </div>
           </div>
-          <div className="p-5 border-t border-slate-800 bg-slate-950/50"><button onClick={handleDeleteOp} disabled={isDeleting} className="w-full bg-rose-950 text-rose-300 hover:bg-rose-900 hover:text-white py-3 rounded-xl font-bold flex justify-center items-center gap-2 border border-rose-900/50 disabled:opacity-50"><Trash2 size={18}/>{isDeleting ? 'Видалення…' : 'Скасувати та видалити операцію'}</button></div>
         </div>
-      </div>}
+      )}
       {confirmDialog}
     </div>
   );
@@ -858,7 +553,7 @@ const TemplateManagerModal = ({ state, dispatch, sessionPin, onClose }) => {
 };
 
 const PostOpExpense = ({ state, dispatch, sessionPin }) => {
-  const [showScanner, setShowScanner] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [formData, setFormData] = useState({operation_num:"", patient_case_id:"", operation_type:"CABG On-pump", date:""});
   const [expenses, setExpenses] = useState([]);
   const [scanMessage, setScanMessage] = useState(null);
@@ -923,24 +618,18 @@ const PostOpExpense = ({ state, dispatch, sessionPin }) => {
     else showMsg('success', `Шаблон "${tpl.name}" застосовано (${addedCount} поз.)`);
   };
 
-  const handleScan = (codeStr) => {
-    setShowScanner(false);
-    const parsed = parseBarcode(codeStr);
-    if (!parsed.code) { showMsg('error', 'Помилка: не знайдено артикул у коді.'); return; }
-
-    const material = state.materials.find(m => m.code === parsed.code);
-    if (!material) { showMsg('error', `Матеріал з кодом ${parsed.code} відсутній у довіднику.`); return; }
-
-    let batch = null;
-    if (parsed.lot) batch = state.stock.find(s => s.material_id === material.id && s.lot_number === parsed.lot && s.quantity > 0);
-    if (!batch && parsed.serial) batch = state.stock.find(s => s.material_id === material.id && s.serial_number === parsed.serial && s.quantity > 0);
-    if (!batch) {
-       const batches = state.stock.filter(s => s.material_id === material.id && s.quantity > 0).sort((a,b) => new Date(a.expiration_date) - new Date(b.expiration_date));
-       if (batches.length > 0) batch = batches[0];
-    }
-
-    if (!batch) { showMsg('error', `Склад порожній: "${material.name}" немає в наявності.`); return; }
-    handleManualAdd(batch, material);
+  // Рядки, підготовлені імпортом з документа (партії вже розраховані й перевірені у вікні імпорту).
+  const applyImportedLines = (lines, text) => {
+    setExpenses(prev => {
+      let cart = [...prev];
+      lines.forEach(({ batch, material, qty }) => {
+        const idx = cart.findIndex(e => e.stock_batch_id === batch.id);
+        if (idx >= 0) cart = cart.map((e, i) => (i === idx ? { ...e, quantity: Math.min(e.max, e.quantity + qty) } : e));
+        else cart.push({ id: genId('exp'), stock_batch_id: batch.id, material_id: material.id, name: material.name, lot: batch.lot_number, serial: batch.serial_number, size: batch.size, quantity: qty, max: batch.quantity });
+      });
+      return cart;
+    });
+    showMsg('success', text);
   };
 
   const submitOperation = async () => {
@@ -975,7 +664,7 @@ const PostOpExpense = ({ state, dispatch, sessionPin }) => {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 animate-in slide-in-from-bottom-4 duration-500">
-      {showScanner && <BarcodeScanner onScan={handleScan} onClose={() => setShowScanner(false)} />}
+      {showImport && <DocumentImportModal mode="writeoff" state={state} dispatch={dispatch} sessionPin={sessionPin} cart={expenses} onApply={applyImportedLines} onClose={() => setShowImport(false)} />}
       {showTemplateManager && <TemplateManagerModal state={state} dispatch={dispatch} sessionPin={sessionPin} onClose={() => setShowTemplateManager(false)} />}
       {scanMessage && (
         <div className={`p-4 rounded-2xl border flex items-center gap-3 shadow-lg ${scanMessage.type === 'error' ? 'bg-rose-950/80 border-rose-900 text-rose-200' : 'bg-teal-950/80 border-teal-900 text-teal-200'}`}>
@@ -1015,12 +704,12 @@ const PostOpExpense = ({ state, dispatch, sessionPin }) => {
              <h3 className="text-sm font-bold text-slate-300 flex items-center gap-2">Додати матеріали:</h3>
              <div className="flex flex-col sm:flex-row gap-3">
                 <SearchableDropdown state={state} onSelect={handleManualAdd} />
-                <button onClick={() => setShowScanner(true)} className="w-full sm:w-auto bg-teal-600 hover:bg-teal-500 text-white px-5 py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shrink-0"><Camera size={18} /> Сканувати</button>
+                <button onClick={() => setShowImport(true)} className="w-full sm:w-auto bg-teal-600 hover:bg-teal-500 text-white px-5 py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shrink-0"><Upload size={18} /> Імпорт з документа</button>
              </div>
           </div>
 
           {expenses.length === 0 ? (
-            <div className="text-center py-10 text-slate-600 border-2 border-dashed border-slate-800 rounded-2xl"><ScanBarcode size={48} className="mx-auto mb-4 opacity-30" /><p className="text-sm font-medium">Шукайте у списку або відскануйте код</p></div>
+            <div className="text-center py-10 text-slate-600 border-2 border-dashed border-slate-800 rounded-2xl"><FileText size={48} className="mx-auto mb-4 opacity-30" /><p className="text-sm font-medium">Шукайте у списку, оберіть шаблон або імпортуйте документ</p></div>
           ) : (
             <div className="space-y-3">
               {expenses.map((item) => (
@@ -1052,10 +741,36 @@ const PostOpExpense = ({ state, dispatch, sessionPin }) => {
   );
 };
 
-// ---------- Імпорт приходу з документа (PDF / Word / фото) ----------
-// Потік: файл → розбір таблиці (documentImport.js) → зіставлення з довідником → ПЕРЕВІРКА і правки користувачем →
-// один пакетний запит addStockBatch (усе або нічого). Нічого не додається на склад без явного підтвердження.
+// ---------- Імпорт з документа (PDF / Word / фото): прихід, списання, довідник ----------
+// Потік: файл → розбір таблиці (documentImport.js) → зіставлення з довідником → ПЕРЕВІРКА і правки користувачем → підтвердження.
+//   mode "stockin"  — прихід: один пакетний запит addStockBatch (усе або нічого);
+//   mode "writeoff" — списання: лише наповнює кошик екрана "Списання на операцію" (на сервер нічого не йде,
+//                     доки користувач не проведе операцію);
+//   mode "catalog"  — довідник: пакетне створення НОВИХ матеріалів, addMaterialsBatch (усе або нічого).
+// Нічого не змінюється без явного підтвердження користувача.
 const IMPORT_ACCEPT = '.pdf,.docx,.jpg,.jpeg,.png,application/pdf,image/*';
+const EMPTY_CART = [];
+
+const IMPORT_MODES = {
+  stockin: {
+    title: 'Імпорт приходу з документа',
+    intro: 'PDF, Word (.docx) або фото накладної (JPG, PNG). Програма розбере таблицю й знайде вироби в довіднику, а ви перевірите й за потреби виправите дані перед додаванням на склад.',
+    submit: 'Додати на склад',
+    filters: [['all', 'Усі'], ['matched', 'Знайдені'], ['missing', 'Не знайдені'], ['selected', 'Відмічені']]
+  },
+  writeoff: {
+    title: 'Імпорт списання з документа',
+    intro: 'PDF, Word (.docx) або фото документа зі списком використаних матеріалів. Програма знайде їх у довіднику й запропонує партії зі складу, а ви перевірите кількості. Залишки на складі не зміняться, поки ви не проведете списання.',
+    submit: 'Додати до списання',
+    filters: [['all', 'Усі'], ['matched', 'Знайдені'], ['missing', 'Не знайдені'], ['selected', 'Відмічені']]
+  },
+  catalog: {
+    title: 'Імпорт довідника з документа',
+    intro: 'PDF, Word (.docx) або фото переліку виробів. Програма покаже, що вже є в довіднику, а яких виробів ще немає — їх можна відмітити й додати як нові матеріали.',
+    submit: 'Додати в довідник',
+    filters: [['all', 'Усі'], ['missing', 'Нові'], ['matched', 'Вже є'], ['selected', 'Відмічені']]
+  }
+};
 
 const IMPORT_BADGES = {
   code:      { text: 'Збіг за артикулом',   cls: 'bg-teal-500/10 text-teal-400 border-teal-500/30' },
@@ -1063,7 +778,11 @@ const IMPORT_BADGES = {
   similar:   { text: 'Схоже — перевірте',   cls: 'bg-amber-500/10 text-amber-400 border-amber-500/30' },
   ambiguous: { text: 'Кілька збігів — оберіть', cls: 'bg-amber-500/10 text-amber-400 border-amber-500/30' },
   manual:    { text: 'Обрано вручну',       cls: 'bg-slate-700 text-slate-200 border-slate-600' },
-  none:      { text: 'Не знайдено в довіднику', cls: 'bg-rose-500/10 text-rose-400 border-rose-500/30' }
+  none:      { text: 'Не знайдено в довіднику', cls: 'bg-rose-500/10 text-rose-400 border-rose-500/30' },
+  // режим довідника: "збіг" означає, що такий матеріал УЖЕ є
+  exists:    { text: 'Вже є в довіднику',   cls: 'bg-slate-700 text-slate-200 border-slate-600' },
+  existsMaybe: { text: 'Схоже на існуючий', cls: 'bg-amber-500/10 text-amber-400 border-amber-500/30' },
+  isNew:     { text: 'Новий матеріал',      cls: 'bg-teal-500/10 text-teal-400 border-teal-500/30' }
 };
 
 const todayLocalStr = () => {
@@ -1071,9 +790,8 @@ const todayLocalStr = () => {
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
 };
 
-const buildImportRow = (item, match, index) => {
-  const confident = (match.kind === 'code' || match.kind === 'name') && !match.ambiguous;
-  return {
+const buildImportRow = (item, match, index, mode) => {
+  const base = {
     key: `imp${index}`,
     rowNo: item.rowNo, docName: item.name, unit: item.unit,
     requested: item.requested, issued: item.issued, qtySource: item.qtySource,
@@ -1081,10 +799,15 @@ const buildImportRow = (item, match, index) => {
     kind: match.materialId ? match.kind : 'none',
     ambiguous: !!match.ambiguous,
     candidates: match.candidates || [],
-    selected: confident,   // автоматично відмічаємо лише впевнені збіги; "схожі" користувач відмічає сам
     qty: item.qty === null || item.qty === undefined ? '' : String(item.qty),
-    lot: '', expiry: '', added: false
+    added: false
   };
+  // довідник: відмічаємо те, чого ще НЕМАЄ (а те, що вже є, лишається невідміченим)
+  if (mode === 'catalog') return { ...base, selected: !match.materialId, code: suggestCode(item), subcategory: '', minStock: '1' };
+  // прихід і списання: автоматично відмічаємо лише впевнені збіги; "схожі" користувач відмічає сам
+  const confident = (match.kind === 'code' || match.kind === 'name') && !match.ambiguous;
+  if (mode === 'writeoff') return { ...base, selected: confident, batchChoice: 'auto' };
+  return { ...base, selected: confident, lot: '', expiry: '' };
 };
 
 const importProblems = (r) => {
@@ -1139,7 +862,8 @@ const ImportMaterialPicker = ({ materials, value, candidates, onChange, invalid 
   );
 };
 
-const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
+const DocumentImportModal = ({ state, dispatch, sessionPin, onClose, mode = 'stockin', cart, onApply }) => {
+  const cfg = IMPORT_MODES[mode] || IMPORT_MODES.stockin;
   const [askConfirm, confirmDialog] = useConfirm();
   const [phase, setPhase] = useState('pick'); // pick | parsing | review
   const [progress, setProgress] = useState({ label: '', pct: null });
@@ -1150,6 +874,7 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
   const [rows, setRows] = useState([]);
   const [filter, setFilter] = useState('all');
   const [bulkExpiry, setBulkExpiry] = useState('');
+  const [bulkSubcategory, setBulkSubcategory] = useState('');
   const [showErrors, setShowErrors] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -1179,7 +904,7 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
     try {
       const parsed = await parseDocumentFile(file, { onProgress: setProgress });
       const matches = matchItems(parsed.items, state.materials);
-      setRows(matches.map(({ item, match }, i) => buildImportRow(item, match, i)));
+      setRows(matches.map(({ item, match }, i) => buildImportRow(item, match, i, mode)));
       setWarnings(parsed.warnings || []); setSource(parsed.source || ''); setAddedCount(0); setFilter('all'); setShowErrors(false);
       setPreview((file.type || '').startsWith('image/') ? URL.createObjectURL(file) : '');
       setPhase('review');
@@ -1198,54 +923,136 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
   const rematch = (key) => setRows(prev => prev.map(r => {
     if (r.key !== key || r.kind === 'manual' || r.added) return r;
     const m = matchItem({ name: r.docName, code: '' }, state.materials);
-    return { ...r, materialId: m.materialId || '', kind: m.materialId ? m.kind : 'none', ambiguous: !!m.ambiguous, candidates: m.candidates, selected: m.materialId ? r.selected : false };
+    return {
+      ...r, materialId: m.materialId || '', kind: m.materialId ? m.kind : 'none', ambiguous: !!m.ambiguous, candidates: m.candidates,
+      selected: mode === 'catalog' ? r.selected : (m.materialId ? r.selected : false)
+    };
   }));
+
+  const today = todayLocalStr();
+  const materialsById = useMemo(() => { const m = {}; state.materials.forEach(x => { m[x.id] = x; }); return m; }, [state.materials]);
+  const subcatNames = (state.subcategories || []).map(sc => sc.name);
+
+  // списання: з яких партій і скільки (рахується по всіх відмічених рядках разом, з урахуванням кошика)
+  const cartLines = cart || EMPTY_CART;
+  const plans = useMemo(() => (mode === 'writeoff' ? planWriteoffRows(rows, state.stock, cartLines, today) : {}), [mode, rows, state.stock, cartLines, today]);
+
+  // довідник: коди, що вже зайняті, і повтори серед відмічених
+  const existingCodes = useMemo(() => new Set(state.materials.map(m => normalizeCode(m.code)).filter(Boolean)), [state.materials]);
+  const chosen = rows.filter(r => r.selected && !r.added);
+  const chosenCodeCount = {};
+  if (mode === 'catalog') chosen.forEach(r => { const c = normalizeCode(r.code); if (c) chosenCodeCount[c] = (chosenCodeCount[c] || 0) + 1; });
+
+  const problemsFor = (r) => {
+    if (mode === 'stockin') return importProblems(r);
+    if (mode === 'writeoff') {
+      const p = [];
+      if (!r.materialId) p.push('material');
+      if (!(Number(r.qty) > 0)) p.push('qty');
+      const pl = plans[r.key];
+      if (pl && !['ok', 'no_material', 'bad_qty'].includes(pl.status)) p.push('batch');
+      return p;
+    }
+    const p = [];
+    if (!r.docName.trim()) p.push('name');
+    const code = normalizeCode(r.code);
+    if (!r.code.trim()) p.push('code');
+    else if (existingCodes.has(code)) p.push('code_exists');
+    else if (chosenCodeCount[code] > 1) p.push('code_dup');
+    if (subcatNames.length > 0 && !r.subcategory) p.push('subcategory');
+    if (r.minStock === '' || !(Number(r.minStock) >= 0)) p.push('min');
+    return p;
+  };
+
+  const planText = (pl, r) => {
+    if (!pl) return '';
+    if (pl.status === 'ok') return 'Буде списано: ' + pl.lines.map(l => `LOT ${l.batch.lot_number} ×${l.qty} (до ${l.batch.expiration_date || '—'})`).join(' + ');
+    if (pl.status === 'shortage') return pl.expiredOnly ? 'Є лише прострочені партії — оберіть партію вручну, якщо це свідомо.' : `Недостатньо залишку: потрібно ${Number(r.qty)}, доступно ${pl.available}.`;
+    if (pl.status === 'no_stock') return 'На складі немає в наявності.';
+    if (pl.status === 'manual_required') return 'Є партії з розміром чи серійним номером — оберіть конкретну партію.';
+    if (pl.status === 'batch_gone') return 'Обрана партія вже недоступна.';
+    return '';
+  };
 
   const counts = {
     all: rows.length,
     matched: rows.filter(r => r.materialId).length,
     missing: rows.filter(r => !r.materialId).length,
-    selected: rows.filter(r => r.selected && !r.added).length
+    selected: chosen.length
   };
   const visibleRows = rows.filter(r => (filter === 'matched' ? !!r.materialId : filter === 'missing' ? !r.materialId : filter === 'selected' ? (r.selected && !r.added) : true));
-  const chosen = rows.filter(r => r.selected && !r.added);
   const totalQty = chosen.reduce((n, r) => n + (Number(r.qty) > 0 ? Number(r.qty) : 0), 0);
-  const today = todayLocalStr();
 
   const applyBulkExpiry = () => {
     if (!bulkExpiry) return;
     setRows(prev => prev.map(r => (r.selected && !r.added && !r.expiry ? { ...r, expiry: bulkExpiry } : r)));
+  };
+  const applyBulkSubcategory = () => {
+    if (!bulkSubcategory) return;
+    setRows(prev => prev.map(r => (r.selected && !r.added && !r.subcategory ? { ...r, subcategory: bulkSubcategory } : r)));
+  };
+
+  const markAdded = (keys) => {
+    setRows(prev => prev.map(r => (keys.has(r.key) ? { ...r, added: true, selected: false } : r)));
+    setAddedCount(n => n + keys.size);
+    setShowErrors(false);
+  };
+
+  const reportServerError = (result) => {
+    const bad1 = typeof result.rowIndex === 'number' ? chosen[result.rowIndex] : null;
+    setSaveError(bad1 ? `${String(result.error).replace(/^Рядок \d+:\s*/, '')} — «${bad1.docName}»` : (result.error || 'Не вдалося зберегти.'));
   };
 
   const handleSubmit = async () => {
     if (isSaving) return;
     setShowErrors(true); setSaveError('');
     if (chosen.length === 0) { setSaveError('Відмітьте хоча б одну позицію.'); return; }
-    const bad = chosen.filter(r => importProblems(r).length > 0);
-    if (bad.length > 0) { setSaveError(`Заповніть обов'язкові поля (матеріал, кількість, LOT, термін) у ${bad.length} поз. — вони підсвічені.`); return; }
-    const expired = chosen.filter(r => r.expiry < today);
-    if (expired.length > 0) {
-      const ok = await askConfirm({
-        title: 'Є прострочені партії',
-        message: `У ${expired.length} поз. термін придатності вже минув — це може бути помилка в даті. Додати все одно?`,
-        confirmLabel: 'Додати все одно'
-      });
-      if (!ok) return;
+    const bad = chosen.filter(r => problemsFor(r).length > 0);
+    if (bad.length > 0) {
+      setSaveError(mode === 'stockin' ? `Заповніть обов'язкові поля (матеріал, кількість, LOT, термін) у ${bad.length} поз. — вони підсвічені.`
+        : mode === 'writeoff' ? `Виправте ${bad.length} поз.: перевірте матеріал, кількість і партію — вони підсвічені.`
+        : `Заповніть обов'язкові поля (назва, код, підкатегорія) у ${bad.length} поз. — вони підсвічені.`);
+      return;
     }
+
+    if (mode === 'writeoff') {
+      const withExpired = chosen.filter(r => plans[r.key] && plans[r.key].usesExpired);
+      if (withExpired.length > 0) {
+        const ok = await askConfirm({ title: 'Обрано прострочені партії', message: `У ${withExpired.length} поз. списання йде з простроченої партії. Додати до списання все одно?`, confirmLabel: 'Додати все одно' });
+        if (!ok) return;
+      }
+      const lines = chosen.flatMap(r => plans[r.key].lines.map(l => ({ batch: l.batch, material: materialsById[r.materialId], qty: l.qty })));
+      if (onApply) onApply(lines, `Додано з документа: ${chosen.length} поз. (${lines.length} партій)`);
+      onClose();
+      return;
+    }
+
+    if (mode === 'stockin') {
+      const expired = chosen.filter(r => r.expiry < today);
+      if (expired.length > 0) {
+        const ok = await askConfirm({
+          title: 'Є прострочені партії',
+          message: `У ${expired.length} поз. термін придатності вже минув — це може бути помилка в даті. Додати все одно?`,
+          confirmLabel: 'Додати все одно'
+        });
+        if (!ok) return;
+      }
+    }
+
     setIsSaving(true);
     try {
-      const items = chosen.map(r => ({ material_id: r.materialId, lot_number: r.lot.trim(), expiration_date: r.expiry, quantity: Number(r.qty) }));
-      const result = await callAction('addStockBatch', { items, source: fileName }, sessionPin);
-      if (!result.success) {
-        const bad1 = typeof result.rowIndex === 'number' ? chosen[result.rowIndex] : null;
-        setSaveError(bad1 ? `${String(result.error).replace(/^Рядок \d+:\s*/, '')} — «${bad1.docName}»` : (result.error || 'Не вдалося додати.'));
-        return;
+      if (mode === 'stockin') {
+        const items = chosen.map(r => ({ material_id: r.materialId, lot_number: r.lot.trim(), expiration_date: r.expiry, quantity: Number(r.qty) }));
+        const result = await callAction('addStockBatch', { items, source: fileName }, sessionPin);
+        if (!result.success) { reportServerError(result); return; }
+        result.data.batches.forEach(b => dispatch({ type: 'ADD_STOCK', payload: b }));
+      } else {
+        const items = chosen.map(r => ({ name: r.docName.trim(), code: r.code.trim(), subcategory: r.subcategory, min_stock: Number(r.minStock) || 0 }));
+        const result = await callAction('addMaterialsBatch', { items, source: fileName }, sessionPin);
+        if (!result.success) { reportServerError(result); return; }
+        result.data.materials.forEach(mm => dispatch({ type: 'ADD_MATERIAL', payload: mm }));
       }
-      result.data.batches.forEach(b => dispatch({ type: 'ADD_STOCK', payload: b }));
-      const doneKeys = new Set(chosen.map(r => r.key));
-      setRows(prev => prev.map(r => (doneKeys.has(r.key) ? { ...r, added: true, selected: false } : r)));
-      setAddedCount(n => n + chosen.length);
-      setShowErrors(false);
+      markAdded(new Set(chosen.map(r => r.key)));
     } catch (e) {
       console.error(e);
       setSaveError(e.message || "Немає з'єднання з сервером.");
@@ -1254,15 +1061,34 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
     }
   };
 
+  const badgeFor = (r) => {
+    if (mode === 'catalog') return !r.materialId ? IMPORT_BADGES.isNew : (r.kind === 'similar' || r.ambiguous ? IMPORT_BADGES.existsMaybe : IMPORT_BADGES.exists);
+    return r.ambiguous && r.materialId ? IMPORT_BADGES.ambiguous : IMPORT_BADGES[r.kind];
+  };
+
   const isOcr = source.includes('ocr');
   const inputCls = (bad) => `w-full bg-slate-950 border rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-teal-500 ${bad ? 'border-rose-500' : 'border-slate-800'}`;
+  const addedLabel = mode === 'catalog' ? 'Додано в довідник' : 'Додано на склад';
+
+  const qtyField = (r, probs) => (
+    <div>
+      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Кількість{r.unit ? `, ${r.unit}` : ''}</label>
+      <input type="number" min="0" step="any" value={r.qty} onChange={e => patchRow(r.key, { qty: e.target.value })} aria-label="Кількість" className={inputCls(probs.includes('qty'))} />
+      {(r.requested || r.issued) && (
+        <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-slate-500">
+          {r.requested ? <button type="button" onClick={() => patchRow(r.key, { qty: String(r.requested) })} className="underline hover:text-slate-300">вимагається {r.requested}</button> : null}
+          {r.issued ? <button type="button" onClick={() => patchRow(r.key, { qty: String(r.issued) })} className="underline hover:text-slate-300">відпущено {r.issued}</button> : null}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-sm z-50 flex justify-center items-stretch md:items-center p-0 md:p-4">
       <div className="bg-slate-900 border border-slate-800 w-full max-w-4xl md:rounded-3xl shadow-2xl flex flex-col h-full md:h-[92vh]">
         <div className="shrink-0 flex items-center justify-between gap-3 p-4 md:p-5 border-b border-slate-800">
           <div className="min-w-0">
-            <h3 className="text-lg font-bold text-white flex items-center gap-2"><FileText size={20} className="text-teal-500 shrink-0" /> Імпорт приходу з документа</h3>
+            <h3 className="text-lg font-bold text-white flex items-center gap-2"><FileText size={20} className="text-teal-500 shrink-0" /> {cfg.title}</h3>
             {phase === 'review' && <p className="text-xs text-slate-500 mt-0.5 truncate">{fileName}</p>}
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -1277,10 +1103,10 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
               <div className="p-4 bg-teal-500/10 rounded-2xl text-teal-400"><FileText size={36} /></div>
               <div className="max-w-md space-y-2">
                 <h4 className="text-white font-bold text-lg">Оберіть документ</h4>
-                <p className="text-sm text-slate-400">PDF, Word (.docx) або фото накладної (JPG, PNG). Програма розбере таблицю й знайде вироби в довіднику, а ви перевірите й за потреби виправите дані перед додаванням на склад.</p>
+                <p className="text-sm text-slate-400">{cfg.intro}</p>
               </div>
               {error && <div role="alert" className="max-w-md w-full bg-rose-950/60 border border-rose-900 text-rose-200 text-sm rounded-xl p-4 text-left flex gap-3"><AlertTriangle size={18} className="shrink-0 mt-0.5" /> {error}</div>}
-              {state.materials.length === 0 && <div className="max-w-md w-full bg-amber-950/60 border border-amber-900 text-amber-200 text-sm rounded-xl p-4 text-left">Довідник порожній: спершу додайте матеріали у вкладці «Довідник».</div>}
+              {state.materials.length === 0 && mode !== 'catalog' && <div className="max-w-md w-full bg-amber-950/60 border border-amber-900 text-amber-200 text-sm rounded-xl p-4 text-left">Довідник порожній: спершу додайте матеріали у вкладці «Довідник».</div>}
               <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
                 <button onClick={() => fileInputRef.current && fileInputRef.current.click()} className="bg-teal-600 hover:bg-teal-500 text-white font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2"><Upload size={18} /> Обрати файл</button>
                 <button onClick={() => cameraInputRef.current && cameraInputRef.current.click()} className="bg-slate-800 hover:bg-slate-700 text-teal-400 font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 border border-slate-700"><Camera size={18} /> Сфотографувати</button>
@@ -1315,32 +1141,47 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
                   {showOriginal && <a href={previewUrl} target="_blank" rel="noreferrer" className="block mt-3"><img src={previewUrl} alt="Оригінал документа" className="w-full max-h-96 object-contain rounded-lg bg-white" /></a>}
                 </div>
               )}
-              {addedCount > 0 && <div className="rounded-xl border border-teal-900 bg-teal-950/40 text-teal-200 text-sm p-4 flex gap-2" role="status"><CheckCircle size={18} className="shrink-0" /> Додано на склад: {addedCount} поз.</div>}
+              {addedCount > 0 && <div className="rounded-xl border border-teal-900 bg-teal-950/40 text-teal-200 text-sm p-4 flex gap-2" role="status"><CheckCircle size={18} className="shrink-0" /> {addedLabel}: {addedCount} поз.</div>}
 
               <div className="flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
                 <div className="flex flex-wrap gap-2">
-                  {[['all', 'Усі'], ['matched', 'Знайдені'], ['missing', 'Не знайдені'], ['selected', 'Відмічені']].map(([id, label]) => (
+                  {cfg.filters.map(([id, label]) => (
                     <button key={id} onClick={() => setFilter(id)} aria-pressed={filter === id} className={`px-3 py-2 rounded-xl text-xs font-bold border ${filter === id ? 'bg-teal-500/10 text-teal-400 border-teal-500/30' : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'}`}>{label} ({counts[id]})</button>
                   ))}
                 </div>
                 <div className="flex flex-wrap gap-2 items-center">
-                  <button onClick={() => setRows(prev => prev.map(r => (r.materialId && !r.added ? { ...r, selected: true } : r)))} className="text-xs font-bold text-slate-300 hover:text-white px-3 py-2 rounded-xl bg-slate-800">Відмітити всі знайдені</button>
+                  <button onClick={() => setRows(prev => prev.map(r => (!r.added && (mode === 'catalog' ? !r.materialId : r.materialId) ? { ...r, selected: true } : r)))} className="text-xs font-bold text-slate-300 hover:text-white px-3 py-2 rounded-xl bg-slate-800">{mode === 'catalog' ? 'Відмітити всі нові' : 'Відмітити всі знайдені'}</button>
                   <button onClick={() => setRows(prev => prev.map(r => ({ ...r, selected: false })))} className="text-xs font-bold text-slate-300 hover:text-white px-3 py-2 rounded-xl bg-slate-800">Зняти всі</button>
                 </div>
               </div>
 
-              <div className="flex flex-col sm:flex-row gap-2 sm:items-center bg-slate-950 border border-slate-800 rounded-xl p-3">
-                <label className="text-xs text-slate-400 font-bold" htmlFor="bulk-expiry">Однаковий термін придатності для відмічених без дати:</label>
-                <input id="bulk-expiry" type="date" value={bulkExpiry} onChange={e => setBulkExpiry(e.target.value)} className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white outline-none" />
-                <button onClick={applyBulkExpiry} disabled={!bulkExpiry} className="text-xs font-bold text-white px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Застосувати</button>
-              </div>
+              {mode === 'stockin' && (
+                <div className="flex flex-col sm:flex-row gap-2 sm:items-center bg-slate-950 border border-slate-800 rounded-xl p-3">
+                  <label className="text-xs text-slate-400 font-bold" htmlFor="bulk-expiry">Однаковий термін придатності для відмічених без дати:</label>
+                  <input id="bulk-expiry" type="date" value={bulkExpiry} onChange={e => setBulkExpiry(e.target.value)} className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  <button onClick={applyBulkExpiry} disabled={!bulkExpiry} className="text-xs font-bold text-white px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Застосувати</button>
+                </div>
+              )}
+              {mode === 'catalog' && (
+                <div className="flex flex-col sm:flex-row gap-2 sm:items-center bg-slate-950 border border-slate-800 rounded-xl p-3">
+                  <label className="text-xs text-slate-400 font-bold" htmlFor="bulk-subcat">Підкатегорія для відмічених без вибору:</label>
+                  <select id="bulk-subcat" value={bulkSubcategory} onChange={e => setBulkSubcategory(e.target.value)} className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white outline-none">
+                    <option value="">Оберіть…</option>
+                    {subcatNames.map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                  <button onClick={applyBulkSubcategory} disabled={!bulkSubcategory} className="text-xs font-bold text-white px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Застосувати</button>
+                </div>
+              )}
 
               <div className="space-y-3">
                 {visibleRows.length === 0 && <div className="text-center text-sm text-slate-500 py-8">Немає рядків за цим фільтром.</div>}
                 {visibleRows.map(r => {
-                  const probs = showErrors && r.selected && !r.added ? importProblems(r) : [];
-                  const badge = r.ambiguous && r.materialId ? IMPORT_BADGES.ambiguous : IMPORT_BADGES[r.kind];
-                  const expired = r.expiry && r.expiry < today;
+                  const probs = showErrors && r.selected && !r.added ? problemsFor(r) : [];
+                  const badge = badgeFor(r);
+                  const expired = mode === 'stockin' && r.expiry && r.expiry < today;
+                  const existing = mode === 'catalog' && r.materialId ? materialsById[r.materialId] : null;
+                  const plan = mode === 'writeoff' && r.selected && !r.added ? plans[r.key] : null;
+                  const rowBatches = mode === 'writeoff' && r.materialId ? availableBatches(state.stock, r.materialId, today) : [];
                   return (
                     <div key={r.key} data-testid="import-row" className={`rounded-2xl border p-4 ${r.added ? 'opacity-50 border-teal-900 bg-slate-900' : r.selected ? 'border-teal-500/40 bg-slate-900' : 'border-slate-800 bg-slate-900/60'}`}>
                       <div className="flex items-start gap-3">
@@ -1348,22 +1189,16 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
                         <div className="flex-1 min-w-0 space-y-3">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="text-[10px] text-slate-500 font-mono shrink-0">№{r.rowNo || '—'}</span>
-                            <input type="text" value={r.docName} disabled={r.added} onChange={e => patchRow(r.key, { docName: e.target.value })} onBlur={() => rematch(r.key)} aria-label="Назва в документі" className="flex-1 min-w-[12rem] bg-transparent border-b border-slate-800 focus:border-teal-500 text-sm text-white outline-none py-1" />
+                            <input type="text" value={r.docName} disabled={r.added} onChange={e => patchRow(r.key, { docName: e.target.value })} onBlur={() => rematch(r.key)} aria-label={mode === 'catalog' ? 'Назва матеріалу' : 'Назва в документі'} className={`flex-1 min-w-[12rem] bg-transparent border-b focus:border-teal-500 text-sm text-white outline-none py-1 ${probs.includes('name') ? 'border-rose-500' : 'border-slate-800'}`} />
                             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${r.added ? 'bg-teal-500/10 text-teal-400 border-teal-500/30' : badge.cls}`}>{r.added ? 'Додано' : badge.text}</span>
                           </div>
-                          {!r.added && <ImportMaterialPicker materials={state.materials} value={r.materialId} candidates={r.candidates} invalid={probs.includes('material')} onChange={id => patchRow(r.key, { materialId: id, kind: 'manual', ambiguous: false, selected: true })} />}
-                          {!r.added && (
+
+                          {existing && !r.added && <div className="text-xs text-amber-300/90">{r.kind === 'similar' || r.ambiguous ? 'Схоже на' : 'Вже є в довіднику'}: {existing.name}{str(existing.code) ? ` · ${existing.code}` : ''}</div>}
+                          {mode !== 'catalog' && !r.added && <ImportMaterialPicker materials={state.materials} value={r.materialId} candidates={r.candidates} invalid={probs.includes('material')} onChange={id => patchRow(r.key, { materialId: id, kind: 'manual', ambiguous: false, selected: true, batchChoice: 'auto' })} />}
+
+                          {mode === 'stockin' && !r.added && (
                             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                              <div>
-                                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Кількість{r.unit ? `, ${r.unit}` : ''}</label>
-                                <input type="number" min="0" step="any" value={r.qty} onChange={e => patchRow(r.key, { qty: e.target.value })} aria-label="Кількість" className={inputCls(probs.includes('qty'))} />
-                                {(r.requested || r.issued) && (
-                                  <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-slate-500">
-                                    {r.requested ? <button type="button" onClick={() => patchRow(r.key, { qty: String(r.requested) })} className="underline hover:text-slate-300">вимагається {r.requested}</button> : null}
-                                    {r.issued ? <button type="button" onClick={() => patchRow(r.key, { qty: String(r.issued) })} className="underline hover:text-slate-300">відпущено {r.issued}</button> : null}
-                                  </div>
-                                )}
-                              </div>
+                              {qtyField(r, probs)}
                               <div>
                                 <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">LOT / партія</label>
                                 <input type="text" value={r.lot} onChange={e => patchRow(r.key, { lot: e.target.value })} aria-label="LOT" className={inputCls(probs.includes('lot'))} />
@@ -1373,6 +1208,49 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
                                 <input type="date" value={r.expiry} onChange={e => patchRow(r.key, { expiry: e.target.value })} aria-label="Придатний до" className={inputCls(probs.includes('expiry'))} />
                                 {expired && <div className="mt-1 text-[10px] text-amber-400">термін уже минув</div>}
                               </div>
+                            </div>
+                          )}
+
+                          {mode === 'writeoff' && !r.added && (
+                            <div className="space-y-2">
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                {qtyField(r, probs)}
+                                <div className="col-span-2">
+                                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Партія</label>
+                                  <select value={r.batchChoice} onChange={e => patchRow(r.key, { batchChoice: e.target.value })} aria-label="Партія" disabled={!r.materialId} className={inputCls(probs.includes('batch'))}>
+                                    <option value="auto" disabled={!isAutoAllocatable(rowBatches)}>Автоматично (спершу з найближчим терміном)</option>
+                                    {rowBatches.map(b => (
+                                      <option key={b.id} value={b.id}>LOT {b.lot_number}{b.size ? ` · розмір ${b.size}` : ''}{b.serial_number ? ` · SN ${b.serial_number}` : ''} · до {b.expiration_date || '—'} · залишок {b.quantity}{b.expired ? ' · ПРОСТРОЧЕНО' : ''}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                              {plan && planText(plan, r) && <div className={`text-xs ${plan.status === 'ok' ? (plan.usesExpired ? 'text-amber-400' : 'text-teal-300') : 'text-rose-300'}`} data-testid="import-plan">{planText(plan, r)}{plan.usesExpired ? ' (прострочена партія!)' : ''}</div>}
+                            </div>
+                          )}
+
+                          {mode === 'catalog' && !r.added && (
+                            <div className="space-y-2">
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                <div>
+                                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Артикул / код *</label>
+                                  <input type="text" value={r.code} onChange={e => patchRow(r.key, { code: e.target.value })} aria-label="Артикул / код" className={`${inputCls(probs.includes('code') || probs.includes('code_exists') || probs.includes('code_dup'))} font-mono`} />
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Підкатегорія *</label>
+                                  <select value={r.subcategory} onChange={e => patchRow(r.key, { subcategory: e.target.value })} aria-label="Підкатегорія" className={inputCls(probs.includes('subcategory'))}>
+                                    <option value="">Оберіть…</option>
+                                    {subcatNames.map(n => <option key={n} value={n}>{n}</option>)}
+                                  </select>
+                                </div>
+                                <div className="col-span-2 md:col-span-1">
+                                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Мін. залишок</label>
+                                  <input type="number" min="0" value={r.minStock} onChange={e => patchRow(r.key, { minStock: e.target.value })} aria-label="Мін. залишок" className={inputCls(probs.includes('min'))} />
+                                </div>
+                              </div>
+                              {probs.includes('code_exists') && <div className="text-xs text-rose-300">Такий код уже є в довіднику — змініть код або зніміть позначку.</div>}
+                              {probs.includes('code_dup') && <div className="text-xs text-rose-300">Цей код повторюється серед відмічених рядків.</div>}
+                              {!r.code.trim() && r.selected && <div className="text-xs text-slate-500">Артикул у документі не знайдено — введіть код вручну.</div>}
                             </div>
                           )}
                         </div>
@@ -1389,10 +1267,10 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose }) => {
           <div className="shrink-0 border-t border-slate-800 p-4 md:p-5 space-y-3">
             {saveError && <div role="alert" className="bg-rose-950/60 border border-rose-900 text-rose-200 text-sm rounded-xl p-3 flex gap-2"><AlertTriangle size={16} className="shrink-0 mt-0.5" /> {saveError}</div>}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <p className="text-sm text-slate-400" data-testid="import-summary">Відмічено: <span className="text-white font-bold">{chosen.length}</span> поз. · усього <span className="text-white font-bold">{totalQty}</span> шт</p>
+              <p className="text-sm text-slate-400" data-testid="import-summary">Відмічено: <span className="text-white font-bold">{chosen.length}</span> поз.{mode !== 'catalog' && <> · усього <span className="text-white font-bold">{totalQty}</span> шт</>}</p>
               <div className="flex gap-2">
                 <button onClick={onClose} className="px-5 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold">Закрити</button>
-                <button onClick={handleSubmit} disabled={isSaving || chosen.length === 0} className="px-5 py-3 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-bold disabled:opacity-40 flex items-center gap-2">{isSaving ? 'Додаю…' : 'Додати на склад'}</button>
+                <button onClick={handleSubmit} disabled={isSaving || chosen.length === 0} className="px-5 py-3 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-bold disabled:opacity-40 flex items-center gap-2">{isSaving ? 'Додаю…' : cfg.submit}</button>
               </div>
             </div>
           </div>
@@ -1526,7 +1404,7 @@ const StockIn = ({ state, dispatch, sessionPin }) => {
 
 const Catalog = ({ state, dispatch, sessionPin }) => {
   const [askConfirm, confirmDialog] = useConfirm();
-  const [showScanner, setShowScanner] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [showSubcatModal, setShowSubcatModal] = useState(false);
   const [newSubcat, setNewSubcat] = useState('');
   const [formData, setFormData] = useState({ id: '', name: '', code: '', subcategory: (state.subcategories||[])[0]?.name||'', min_stock: 1 });
@@ -1563,11 +1441,6 @@ const Catalog = ({ state, dispatch, sessionPin }) => {
        dispatch({ type: 'DELETE_MATERIAL', payload: id });
      } catch(e) { console.error(e); alert("Помилка видалення: немає з'єднання з сервером."); }
   };
-  const handleScan = (codeStr) => {
-    setShowScanner(false);
-    const parsed = parseBarcode(codeStr);
-    if(parsed.code) setFormData({...formData, code: parsed.code});
-  };
   const handleAddSubcat = async () => {
      if(!newSubcat.trim()) return;
      if (isAddingSubcat) return;
@@ -1596,7 +1469,7 @@ const Catalog = ({ state, dispatch, sessionPin }) => {
 
   return (
     <div className="animate-in slide-in-from-bottom-4 duration-500 space-y-6">
-      {showScanner && <BarcodeScanner onScan={handleScan} onClose={() => setShowScanner(false)} />}
+      {showImport && <DocumentImportModal mode="catalog" state={state} dispatch={dispatch} sessionPin={sessionPin} onClose={() => setShowImport(false)} />}
 
       {showSubcatModal && (
          <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex justify-center items-center p-4">
@@ -1623,10 +1496,11 @@ const Catalog = ({ state, dispatch, sessionPin }) => {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl h-fit">
-          <h3 className="text-lg font-bold text-white mb-6 flex items-center gap-2"><Edit2 className="text-teal-500"/> {isEditing ? 'Редагування' : 'Новий матеріал'}</h3>
+          <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Edit2 className="text-teal-500"/> {isEditing ? 'Редагування' : 'Новий матеріал'}</h3>
+          {!isEditing && <button onClick={() => setShowImport(true)} className="w-full mb-6 bg-slate-800 hover:bg-slate-700 text-teal-400 px-4 py-2.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors border border-slate-700"><Upload size={18} /> Імпорт з документа</button>}
           <div className="space-y-4">
             <div><label className="text-[10px] font-bold text-slate-400 uppercase pl-1">Назва *</label><input type="text" value={formData.name} onChange={e=>setFormData({...formData,name:e.target.value})} className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-white outline-none"/></div>
-            <div><label className="text-[10px] font-bold text-slate-400 uppercase pl-1">Артикул / Код / GTIN *</label><div className="flex gap-2"><input type="text" value={formData.code} onChange={e=>setFormData({...formData,code:e.target.value})} className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-teal-400 font-mono outline-none"/><button onClick={()=>setShowScanner(true)} className="bg-slate-800 px-4 rounded-xl hover:bg-slate-700 text-teal-400"><Camera size={20}/></button></div></div>
+            <div><label className="text-[10px] font-bold text-slate-400 uppercase pl-1">Артикул / Код / GTIN *</label><input type="text" value={formData.code} onChange={e=>setFormData({...formData,code:e.target.value})} className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-teal-400 font-mono outline-none"/></div>
             <div>
                <label className="text-[10px] font-bold text-slate-400 uppercase flex justify-between items-center mb-1 pl-1">Підкатегорія <button onClick={() => setShowSubcatModal(true)} className="text-teal-400 hover:text-teal-300 flex items-center gap-1 bg-slate-950 px-2 py-0.5 rounded-lg border border-slate-800"><Edit2 size={10}/> Налаштувати</button></label>
                <select value={formData.subcategory} onChange={e=>setFormData({...formData,subcategory:e.target.value})} className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-white outline-none appearance-none">
@@ -1970,6 +1844,7 @@ const AUDIT_TONES = {
 const AUDIT_ACTIONS = {
   addStock:          { label: 'Прихід',                 tone: 'teal',   groups: ['stock'] },
   addStockBatch:     { label: 'Прихід з документа',     tone: 'teal',   groups: ['stock'] },
+  addMaterialsBatch: { label: 'Довідник з документа',   tone: 'teal',   groups: [] },
   addOperation:      { label: 'Списання на операцію',   tone: 'teal',   groups: ['stock'] },
   addWriteoff:       { label: 'Списання зі складу',     tone: 'amber',  groups: ['stock'] },
   deleteOperation:   { label: 'Видалення операції',     tone: 'rose',   groups: ['delete', 'stock'] },
@@ -2375,7 +2250,7 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-4 md:px-8 py-6 md:py-10">
         <ErrorBoundary resetKey={currentTab}>
-          {currentTab === 'dashboard' && hasAccess('dashboard') && <Dashboard state={state} dispatch={dispatch} sessionPin={sessionPin} setActiveTab={setActiveTab} />}
+          {currentTab === 'dashboard' && hasAccess('dashboard') && <Dashboard state={state} dispatch={dispatch} sessionPin={sessionPin} />}
           {currentTab === 'postop' && hasAccess('postop') && <PostOpExpense state={state} dispatch={dispatch} sessionPin={sessionPin} />}
           {currentTab === 'stockin' && hasAccess('stockin') && <StockIn state={state} dispatch={dispatch} sessionPin={sessionPin} />}
           {currentTab === 'catalog' && hasAccess('catalog') && <Catalog state={state} dispatch={dispatch} sessionPin={sessionPin} />}
