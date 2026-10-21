@@ -52,7 +52,7 @@ const HEADER_ROLES = [
   ['price', /^ціна/i],
   ['requested', /вимагає|замовл|потреб|заявл/i],
   ['issued', /відпущ|видан|отримано|прийнято/i],
-  ['qty', /^кількість|^к-сть|^кіл-сть|^кільк/i],
+  ['qty', /^кількість|^к-сть|^кіл-сть|^кільк|^використан|^списан|^витрач/i],
   ['stock', /наявн|залишок/i],
   ['avg', /середньо/i],
   ['code', /артикул|^код\b|каталож|^ref\b|^арт\./i]
@@ -463,8 +463,8 @@ export function normalizeCode(s) {
 
 const UNIT_WORDS = new Set(['мл', 'мг', 'мм', 'см', 'г', 'кг', 'л', 'шт', 'мкг', 'ме', 'од', 'fr', 'ml', 'mg', 'mm', 'cm', 'kg', '%']);
 
-/** Артикули/коди в тексті: токени з ≥ 4 цифр, або ≥ 3 цифр і літерами; числа з одиницями ("1000 мл") — не коди. */
-export function extractCodes(text) {
+/** Артикули/коди в тексті "як написано": токени з ≥ 4 цифр, або ≥ 3 цифр і літерами; числа з одиницями ("1000 мл") — не коди. */
+export function extractCodeTokens(text) {
   const tokens = norm(text).split(/[\s,;()]+/).filter(Boolean);
   const out = [];
   tokens.forEach((tok, i) => {
@@ -476,10 +476,31 @@ export function extractCodes(text) {
     const next = (tokens[i + 1] || '').toLowerCase().replace(/[^a-zа-яіїє%]/g, '');
     if (!hasLetters && UNIT_WORDS.has(next)) return;
     if (/^\d{1,2}[./]\d{1,2}[./]\d{2,4}$/.test(clean)) return; // дати
-    const code = normalizeCode(clean);
-    if (code && out.indexOf(code) === -1) out.push(code);
+    out.push(clean);
   });
   return out;
+}
+
+/** Артикули/коди в тексті у нормалізованому вигляді (для порівняння). */
+export function extractCodes(text) {
+  const out = [];
+  extractCodeTokens(text).forEach((t) => { const code = normalizeCode(t); if (code && out.indexOf(code) === -1) out.push(code); });
+  return out;
+}
+
+const CYR_TO_LAT_CODE = { 'А': 'A', 'В': 'B', 'С': 'C', 'Е': 'E', 'Н': 'H', 'К': 'K', 'М': 'M', 'О': 'O', 'Р': 'P', 'Т': 'T', 'Х': 'X', 'І': 'I', 'У': 'Y',
+  'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'х': 'x', 'і': 'i', 'у': 'y' };
+
+/** "94215Т" (кирилична Т) → "94215T": у коді матеріалу літери-двійники записуємо латиницею. */
+export function latinizeCode(code) {
+  return String(code === undefined || code === null ? '' : code).split('').map((ch) => CYR_TO_LAT_CODE[ch] || ch).join('');
+}
+
+/** Код для НОВОГО матеріалу довідника: стовпець "Артикул" документа, а якщо його немає — останній артикул у назві. */
+export function suggestCode(item) {
+  if (item && norm(item.code)) return latinizeCode(norm(item.code));
+  const tokens = extractCodeTokens(item ? item.name : '');
+  return tokens.length ? latinizeCode(tokens[tokens.length - 1]) : '';
 }
 
 const STOPWORDS = new Set(['та', 'і', 'й', 'з', 'із', 'для', 'на', 'в', 'у', 'до', 'по', 'або', 'від', 'про', 'шт', 'the', 'and']);
@@ -572,6 +593,80 @@ export function matchItem(item, materials, prepared) {
 export function matchItems(items, materials) {
   const prepared = materials.map(prepareMaterial);
   return items.map((item) => ({ item, match: matchItem(item, materials, prepared) }));
+}
+
+// =====================================================================================
+// 6b. СПИСАННЯ З ПАРТІЙ: з яких партій і скільки списувати за позицією документа
+// =====================================================================================
+
+/** Партії матеріалу, що є в наявності, у порядку "спершу ті, що швидше спливають"; прострочені — в кінці й позначені. */
+export function availableBatches(stock, materialId, todayStr) {
+  return stock
+    .filter((b) => b.material_id === materialId && Number(b.quantity) > 0)
+    .map((b) => ({ ...b, expired: !!b.expiration_date && String(b.expiration_date) < todayStr }))
+    .sort((a, b) => (Number(a.expired) - Number(b.expired)) || String(a.expiration_date || '9999-99-99').localeCompare(String(b.expiration_date || '9999-99-99')));
+}
+
+/**
+ * Автоматично (за терміном) можна списувати лише матеріали без розмірів і серійних номерів.
+ * Імплант чи виріб із розміром підбирати "навмання" не можна — користувач обирає конкретну партію сам.
+ */
+export function isAutoAllocatable(batches) {
+  return batches.length > 0 && batches.every((b) => !norm(b.serial_number) && !norm(b.size));
+}
+
+/**
+ * План списання для відмічених рядків. Рядки опрацьовуються по черзі й "з'їдають" залишок один в одного,
+ * тож два рядки з одним матеріалом не спишуть більше, ніж є; враховується і те, що вже лежить у кошику.
+ * Прострочені партії автоматично НЕ використовуються — лише якщо користувач обрав таку партію вручну.
+ * rows: [{ key, selected, added, materialId, qty, batchChoice ('auto' | id партії) }]
+ * Повертає { [key]: { status, lines:[{batch, qty}], usesExpired, shortage?, available?, expiredOnly? } }
+ * status: ok | no_material | bad_qty | no_stock | manual_required | batch_gone | shortage
+ */
+export function planWriteoffRows(rows, stock, cart, todayStr) {
+  const used = {};
+  (cart || []).forEach((e) => { used[e.stock_batch_id] = (used[e.stock_batch_id] || 0) + Number(e.quantity || 0); });
+  const remaining = (b) => Math.max(0, Number(b.quantity) - (used[b.id] || 0));
+  const plans = {};
+
+  for (const r of rows) {
+    if (!r.selected || r.added) continue;
+    const qty = Number(r.qty);
+    if (!r.materialId) { plans[r.key] = { status: 'no_material', lines: [] }; continue; }
+    if (!(qty > 0)) { plans[r.key] = { status: 'bad_qty', lines: [] }; continue; }
+    const all = availableBatches(stock, r.materialId, todayStr);
+    if (all.length === 0) { plans[r.key] = { status: 'no_stock', lines: [] }; continue; }
+
+    if (r.batchChoice && r.batchChoice !== 'auto') {
+      const b = all.find((x) => x.id === r.batchChoice);
+      if (!b) { plans[r.key] = { status: 'batch_gone', lines: [] }; continue; }
+      const rem = remaining(b);
+      if (qty > rem) { plans[r.key] = { status: 'shortage', lines: [], shortage: qty - rem, available: rem, manual: true }; continue; }
+      used[b.id] = (used[b.id] || 0) + qty;
+      plans[r.key] = { status: 'ok', lines: [{ batch: b, qty }], usesExpired: !!b.expired, manual: true };
+      continue;
+    }
+
+    if (!isAutoAllocatable(all)) { plans[r.key] = { status: 'manual_required', lines: [] }; continue; }
+    let need = qty; const lines = [];
+    for (const b of all) {
+      if (b.expired) continue;
+      const rem = remaining(b);
+      if (rem <= 0) continue;
+      const take = Math.min(rem, need);
+      lines.push({ batch: b, qty: take });
+      need -= take;
+      if (need <= 0) break;
+    }
+    if (need > 0) {
+      const expiredOnly = lines.length === 0 && all.every((b) => b.expired);
+      plans[r.key] = { status: 'shortage', lines, shortage: need, available: qty - need, expiredOnly };
+      continue;
+    }
+    lines.forEach((l) => { used[l.batch.id] = (used[l.batch.id] || 0) + l.qty; });
+    plans[r.key] = { status: 'ok', lines, usesExpired: false, manual: false };
+  }
+  return plans;
 }
 
 // =====================================================================================
