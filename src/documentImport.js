@@ -182,9 +182,12 @@ function detectHeader(items, medianH) {
 
 /**
  * @param {Array<Array<{text,x,y,w,h}>>} pages — елементи по сторінках (для зображення — одна "сторінка")
+ * @param {{ skipOcrRepairs?: boolean }} [opts] — skipOcrRepairs: не застосовувати виправлення вад tesseract
+ *   (склеювання "7"+"7", відновлення "77" за шириною слова). Для слів від Google Vision їх вимикаємо:
+ *   Vision не розбиває числа, а евристика за шириною могла б мовчки перетворити правильне "8" на "88".
  * @returns {{ rows: Array, warnings: string[], headerFound: boolean }}
  */
-export function extractFromPositioned(pages) {
+export function extractFromPositioned(pages, opts = {}) {
   const rows = [];
   const warnings = [];
   let carried = null; // колонки із заголовка попередньої сторінки (таблиця може тривати на наступних)
@@ -197,8 +200,8 @@ export function extractFromPositioned(pages) {
       .filter((it) => norm(it.text));
     if (cleaned.length === 0) return;
     const medianH = median(cleaned.map((i) => i.h), 10);
-    const merged = mergeDigitFragments(cleaned, medianH);
-    const fixed = repairRepeatedDigits(merged);
+    const merged = opts.skipOcrRepairs ? cleaned : mergeDigitFragments(cleaned, medianH);
+    const fixed = opts.skipOcrRepairs ? { items: merged, repaired: 0 } : repairRepeatedDigits(merged);
     const pageItems = fixed.items;
     if (fixed.repaired) warnings.push(`OCR пропустив повторювані цифри в ${fixed.repaired} числах — їх відновлено за шириною слова (перевірте кількості).`);
 
@@ -926,9 +929,9 @@ async function ocrToItems(image, { loaders, onProgress }) {
   }
 }
 
-function positionedToItems(pages) {
+function positionedToItems(pages, opts = {}) {
   const warnings = [];
-  const res = extractFromPositioned(pages);
+  const res = extractFromPositioned(pages, opts);
   let rows = res.rows;
   if (rows.length === 0) {
     // Заголовок не розпізнано → запасний розбір за рядками тексту
@@ -1012,5 +1015,109 @@ export async function parseDocumentFile(file, { onProgress = () => {}, loaders =
   return { items: result.items, warnings: result.warnings, source };
 }
 
+// =====================================================================================
+// 8. «Зчитати з AI» — розпізнавання ФОТО через Google Cloud Vision (лише за кнопкою)
+// =====================================================================================
+// Звичайне читання (tesseract, parseDocumentFile) не змінюється і лишається типовим. Ця гілка запускається
+// тільки коли користувач сам натиснув «Зчитати з AI» — наприклад, коли фото надто складне для tesseract.
+// Фото надсилається на сервер застосунку (Apps Script, дія 'ocrImage'), а звідти — у Vision. Ключ API у браузері
+// ніколи не з'являється. Відповідь Vision приведена на сервері до того самого формату слів {text,x,y,w,h},
+// що й вихід tesseract, тож розбір таблиці, зіставлення з довідником і план списання працюють без змін.
+
+const AI_MAX_SIDE = 2000;                 // найбільша сторона фото, що йде в Vision (більше не дає користі, лише розмір)
+const AI_MAX_BYTES = 3 * 1024 * 1024;     // сервер приймає до 4 МБ; беремо запас
+
+/**
+ * Масштаб, до якого tesseract-гілка наводить фото (див. imageToCanvas). Розбір таблиці має пікселні допуски
+ * (напр. 40 px для прив'язки числа до стовпця), підібрані саме під цей масштаб, тому координати слів від Vision
+ * приводимо до нього.
+ */
+function parserScaleFor(longSide) {
+  return longSide < 1800 ? Math.min(3, 2400 / longSide) : Math.min(1, 2600 / longSide);
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(new Error('Не вдалося прочитати фото.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Фото → JPEG для Vision. На відміну від підготовки для tesseract, тут НЕ робимо чорно-біле й не стираємо лінії:
+ * Vision краще читає звичайне кольорове фото. Лише: орієнтація EXIF, зменшення до AI_MAX_SIDE, стискання JPEG.
+ * Повертає { base64, bytes, factor } — factor переводить координати Vision у масштаб розбору таблиці.
+ */
+async function imageToJpegForAi(file) {
+  const bitmap = await createImageBitmap(file); // застосовує EXIF-орієнтацію
+  try {
+    const longSide = Math.max(bitmap.width, bitmap.height);
+    const parserScale = parserScaleFor(longSide);
+    let sentScale = Math.min(1, AI_MAX_SIDE / longSide);
+    let quality = 0.85;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * sentScale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * sentScale));
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height); // прозорі PNG → білий фон
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', quality));
+      if (!blob) throw new Error('Не вдалося підготувати фото для AI.');
+      if (blob.size <= AI_MAX_BYTES) {
+        return { base64: await blobToBase64(blob), bytes: blob.size, factor: parserScale / sentScale };
+      }
+      sentScale *= 0.8; quality = Math.max(0.6, quality - 0.1);
+    }
+    throw new Error('Фото завелике для AI-розпізнавання. Зробіть фото меншого розміру.');
+  } finally {
+    if (bitmap.close) bitmap.close();
+  }
+}
+
+/** Слова від сервера → елементи позиційного розбору (чиста функція; factor — масштаб координат). */
+export function aiWordsToItems(words, factor = 1) {
+  const f = Number.isFinite(factor) && factor > 0 ? factor : 1;
+  return (Array.isArray(words) ? words : [])
+    .filter((w) => w && norm(w.text) && [w.x, w.y, w.w, w.h].every((n) => Number.isFinite(Number(n))))
+    .map((w) => ({ text: String(w.text), x: Number(w.x) * f, y: Number(w.y) * f, w: Number(w.w) * f, h: Number(w.h) * f }));
+}
+
+/**
+ * Фото → { items, warnings, source: 'image-ocr-ai', text, cached } через Google Cloud Vision.
+ * callOcr({ image, mode }) → Promise<{ success, data?, error? }> передає App (виклик 'ocrImage' з PIN сесії).
+ * isCancelled() — користувач натиснув «Скасувати»: після кожного кроку перевіряємо й не платимо за зайве.
+ * Кидає Error з готовим текстом українською.
+ */
+export async function parseImageWithAi(file, { callOcr, onProgress = () => {}, isCancelled = () => false, mode = 'document' } = {}) {
+  if (!file) throw new Error('Файл не обрано.');
+  if (typeof callOcr !== 'function') throw new Error('AI-розпізнавання недоступне.');
+  if (file.size > MAX_FILE_BYTES) throw new Error('Файл завеликий (понад 25 МБ).');
+  if (detectKind(file) !== 'image') throw new Error('Кнопка «Зчитати з AI» працює лише з фото (JPG, PNG). PDF і Word читаються звичайним способом.');
+  const cancelled = () => { const e = new Error('Скасовано.'); e.cancelled = true; return e; };
+
+  onProgress({ label: 'Готую фото для AI…', pct: null });
+  const prep = await imageToJpegForAi(file);
+  if (isCancelled()) throw cancelled();
+
+  onProgress({ label: 'AI розпізнає текст… (зазвичай кілька секунд)', pct: null });
+  const res = await callOcr({ image: prep.base64, mode });
+  if (isCancelled()) throw cancelled();
+  if (!res || !res.success) throw new Error((res && res.error) || 'AI-розпізнавання не вдалося.');
+
+  const data = res.data || {};
+  const words = aiWordsToItems(data.words, prep.factor);
+  if (words.length === 0) throw new Error('AI не знайшов тексту на фото. Спробуйте зробити фото чіткіше, рівніше й при кращому освітленні.');
+
+  const result = positionedToItems([words], { skipOcrRepairs: true });
+  if (result.items.length === 0) {
+    throw new Error(`AI розпізнав текст (слів: ${words.length}), але не знайшов у ньому таблиці з виробами. Переконайтесь, що на фото видно заголовки стовпців «Найменування» і «Кількість».`);
+  }
+  result.warnings.unshift('Фото розпізнано за допомогою AI (Google Cloud Vision): назви й цифри можуть містити помилки — уважно перевірте.');
+  return { items: result.items, warnings: result.warnings, source: 'image-ocr-ai', text: String(data.text || ''), cached: !!data.cached };
+}
+
 // Для тестів
-export const __internals = { groupIntoLines, detectHeader, roleOf, positionedToItems, ocrToItems, estimateSkew, repairRepeatedDigits, mergeDigitFragments };
+export const __internals = { aiWordsToItems, parserScaleFor, groupIntoLines, detectHeader, roleOf, positionedToItems, ocrToItems, estimateSkew, repairRepeatedDigits, mergeDigitFragments };
