@@ -2453,6 +2453,35 @@ export default function App() {
 
   const closeAuth = () => { setShowAuth(false); setPin(''); setPinError(''); };
 
+  // Введення PIN з клавіатури (цифри верхнього ряду й numpad, Backspace — стерти, Enter — OK, Esc — скасувати).
+  // Слухач живе лише поки відкрите вікно PIN. Ctrl/Cmd/Alt-комбінації не чіпаємо, щоб працювали системні шорткати.
+  useEffect(() => {
+    if (!showAuth) return;
+    // Якщо фокус лишився у полі на сторінці під вікном, цифри потрапили б і туди — знімаємо фокус.
+    const active = document.activeElement;
+    if (active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) active.blur();
+
+    const onKeyDown = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (/^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        if (!e.repeat) handlePinDigit(e.key);
+      } else if (e.key === 'Backspace') {
+        e.preventDefault();
+        handlePinBackspace();
+      } else if (e.key === 'Enter') {
+        e.preventDefault(); // щоб Enter не "натиснув" кнопку, на якій зараз фокус
+        if (!e.repeat && pin.length >= PIN_MIN_LENGTH) submitPin(pin);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        if (!isCheckingPin) closeAuth();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAuth, pin, isCheckingPin]);
+
   const hasAccess = (tabId) => {
      if (!currentUser) return false;
      if (currentUser.role === 'admin') return true;
@@ -2493,7 +2522,7 @@ export default function App() {
               <div className="flex gap-3 mb-3">
                 {Array.from({ length: PIN_MAX_LENGTH }, (_, i) => i).map(i => <div key={i} className={`w-4 h-4 rounded-full transition-all ${pin.length > i ? 'bg-teal-500 scale-110 shadow-[0_0_10px_rgba(20,184,166,0.5)]' : 'bg-slate-800'}`}></div>)}
               </div>
-              <p className="text-[11px] text-slate-500 mb-5">4–6 цифр, потім натисніть OK</p>
+              <p className="text-[11px] text-slate-500 mb-5">4–6 цифр (екранні кнопки або клавіатура), потім OK / Enter</p>
               {pinError && <p className="text-sm text-rose-400 font-medium mb-5 text-center" role="alert">{pinError}</p>}
               <div className="grid grid-cols-3 gap-4 w-full mb-6">
                  {[1,2,3,4,5,6,7,8,9].map(num => <button key={num} disabled={isCheckingPin} onClick={()=>handlePinDigit(num.toString())} className="h-16 bg-slate-800 hover:bg-slate-700 rounded-2xl text-2xl font-bold text-white transition-colors shadow-sm disabled:opacity-40">{num}</button>)}
