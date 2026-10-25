@@ -126,48 +126,194 @@ const useConfirm = () => {
   return [askConfirm, confirmDialog];
 };
 
-const Dashboard = ({ state, dispatch, sessionPin }) => {
+const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
   const [askConfirm, confirmDialog] = useConfirm();
   const [selectedOp, setSelectedOp] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [period, setPeriod] = useState(30);
+  const [trendMetric, setTrendMetric] = useState('units');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [search, setSearch] = useState('');
+  const [stockFilter, setStockFilter] = useState('all');
+  const [sortBy, setSortBy] = useState('deficit');
+  const [page, setPage] = useState(1);
+  const [alertFilter, setAlertFilter] = useState('');
 
-  const totalItems = state.stock.reduce((sum, item) => sum + item.quantity, 0);
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const dayStart = new Date(`${todayKey}T00:00:00`);
+  const dateKey = (value) => {
+    if (!value) return '';
+    const raw = String(value);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+      const timestamp = new Date(raw);
+      if (!Number.isNaN(timestamp.getTime())) return `${timestamp.getFullYear()}-${String(timestamp.getMonth() + 1).padStart(2, '0')}-${String(timestamp.getDate()).padStart(2, '0')}`;
+    }
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return '';
+    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+  };
+  const displayDate = (value) => {
+    const key = dateKey(value);
+    if (!key) return '—';
+    const [y, m, d] = key.split('-');
+    return `${d}.${m}.${y}`;
+  };
+  const qty = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const goTo = (tab) => { if (setActiveTab) setActiveTab(tab); };
+  const daysFromToday = (value) => {
+    const key = dateKey(value);
+    if (!key) return null;
+    return Math.floor((new Date(`${key}T00:00:00`).getTime() - dayStart.getTime()) / 86400000);
+  };
 
-  const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  const operationsLast30Days = state.operations.filter(op => new Date(op.operation_date) >= thirtyDaysAgo).length;
+  const stockByMaterial = useMemo(() => {
+    const map = new Map();
+    state.materials.forEach(material => map.set(material.id, {
+      material, total: 0, usable: 0, expired: 0, expiring: 0, missingExpiry: 0, batches: 0
+    }));
+    state.stock.forEach(batch => {
+      const row = map.get(batch.material_id);
+      if (!row) return;
+      const amount = Math.max(0, qty(batch.quantity));
+      row.total += amount;
+      if (amount <= 0) return;
+      row.batches += 1;
+      const days = daysFromToday(batch.expiration_date);
+      if (days === null) row.missingExpiry += amount;
+      else if (days < 0) row.expired += amount;
+      else {
+        row.usable += amount;
+        if (days <= 30) row.expiring += amount;
+      }
+    });
+    return map;
+  }, [state.materials, state.stock, todayKey]);
 
-  const thirtyDaysFuture = new Date(); thirtyDaysFuture.setDate(thirtyDaysFuture.getDate() + 30);
-  const expiringItems = state.stock.filter(item => new Date(item.expiration_date) <= thirtyDaysFuture && item.quantity > 0);
-  const lowStockItems = state.materials.filter(mat => {
-    const totalQty = state.stock.filter(s => s.material_id === mat.id).reduce((sum, s) => sum + s.quantity, 0);
-    return totalQty < mat.min_stock;
+  const materialRows = useMemo(() => Array.from(stockByMaterial.values()).map(row => {
+    const minimum = Math.max(0, qty(row.material.min_stock));
+    return { ...row, minimum, deficit: Math.max(0, minimum - row.usable), isLow: row.usable < minimum };
+  }), [stockByMaterial]);
+
+  const usableTotal = materialRows.reduce((sum, row) => sum + row.usable, 0);
+  const totalRecorded = materialRows.reduce((sum, row) => sum + row.total, 0);
+  const lowStockItems = materialRows.filter(row => row.isLow && row.minimum > 0);
+  const zeroStockItems = materialRows.filter(row => row.usable <= 0 && row.minimum > 0);
+  const expiredBatches = state.stock.filter(batch => qty(batch.quantity) > 0 && daysFromToday(batch.expiration_date) !== null && daysFromToday(batch.expiration_date) < 0);
+  const expiringBatches = state.stock.filter(batch => {
+    const days = daysFromToday(batch.expiration_date);
+    return qty(batch.quantity) > 0 && days !== null && days >= 0 && days <= 30;
+  });
+  const missingExpiryBatches = state.stock.filter(batch => qty(batch.quantity) > 0 && !dateKey(batch.expiration_date));
+
+  const cutoff = new Date(dayStart);
+  cutoff.setDate(cutoff.getDate() - (period - 1));
+  const operationsInPeriod = state.operations.filter(op => {
+    const key = dateKey(op.operation_date);
+    return key && new Date(`${key}T00:00:00`) >= cutoff && new Date(`${key}T00:00:00`) <= dayStart;
   });
 
-  const pieData = useMemo(() => {
-    const categories = {};
-    state.stock.forEach(batch => {
-       if (batch.quantity <= 0) return;
-       const mat = state.materials.find(m => m.id === batch.material_id);
-       if (!mat) return;
-       const cat = mat.subcategory || 'Без підкатегорії';
-       categories[cat] = (categories[cat] || 0) + batch.quantity;
-    });
-    return Object.entries(categories).map(([name, value]) => ({ name, value })).filter(d => d.value > 0).sort((a,b)=>b.value - a.value);
-  }, [state.stock, state.materials]);
+  const expenseRecords = useMemo(() => state.expenses.map(expense => {
+    const operation = state.operations.find(op => op.id === expense.operation_id);
+    const batch = state.stock.find(item => item.id === expense.stock_batch_id) ||
+      state.writeoffs.find(item => item.id === expense.stock_batch_id);
+    const material = state.materials.find(item => item.id === batch?.material_id);
+    const date = dateKey(expense.created_at) || dateKey(operation?.operation_date);
+    return { ...expense, operation, batch, material, date, amount: Math.max(0, qty(expense.quantity)) };
+  }), [state.expenses, state.operations, state.stock, state.writeoffs, state.materials]);
 
-  const COLORS = ['#0d9488', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899', '#64748b'];
+  const trendData = useMemo(() => {
+    const result = [];
+    for (let offset = period - 1; offset >= 0; offset -= 1) {
+      const date = new Date(dayStart);
+      date.setDate(date.getDate() - offset);
+      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      result.push({ key, label: `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}`, units: 0, operations: 0 });
+    }
+    const byDate = new Map(result.map(row => [row.key, row]));
+    if (trendMetric === 'operations') {
+      state.operations.forEach(op => {
+        const row = byDate.get(dateKey(op.operation_date));
+        if (row) row.operations += 1;
+      });
+    } else {
+      expenseRecords.forEach(expense => {
+        const row = byDate.get(expense.date);
+        if (row) row.units += expense.amount;
+      });
+    }
+    return result;
+  }, [period, trendMetric, state.operations, expenseRecords, todayKey]);
 
-  const barData = useMemo(() => {
-    const months = {};
-    state.operations.forEach(op => {
-      const month = op.operation_date.substring(0, 7);
-      months[month] = (months[month] || 0) + 1;
+  const categoryData = useMemo(() => {
+    const categories = new Map();
+    expenseRecords.forEach(expense => {
+      if (!expense.date || expense.date < dateKey(cutoff) || expense.date > todayKey || expense.amount <= 0) return;
+      const name = expense.material?.subcategory || 'Без категорії';
+      categories.set(name, (categories.get(name) || 0) + expense.amount);
     });
-    return Object.entries(months).map(([name, value]) => ({ name, value })).sort((a,b) => a.name.localeCompare(b.name)).slice(-6);
-  }, [state.operations]);
+    return Array.from(categories, ([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+  }, [expenseRecords, period, todayKey]);
+
+  const alerts = useMemo(() => {
+    const list = [];
+    expiredBatches.forEach(batch => {
+      const material = state.materials.find(item => item.id === batch.material_id);
+      list.push({ key: `expired-${batch.id}`, type: 'expired', title: material?.name || 'Невідомий матеріал', detail: `Партія ${batch.lot_number || 'без LOT'} · прострочена ${displayDate(batch.expiration_date)}`, quantity: qty(batch.quantity), priority: 0 });
+    });
+    zeroStockItems.forEach(row => list.push({ key: `zero-${row.material.id}`, type: 'zero', title: row.material.name, detail: `Доступно 0 · мінімум ${row.minimum}`, quantity: 0, priority: 1 }));
+    lowStockItems.filter(row => row.usable > 0).forEach(row => list.push({ key: `low-${row.material.id}`, type: 'low', title: row.material.name, detail: `Доступно ${row.usable} · мінімум ${row.minimum}`, quantity: row.deficit, priority: 2 }));
+    expiringBatches.forEach(batch => {
+      const material = state.materials.find(item => item.id === batch.material_id);
+      list.push({ key: `expiring-${batch.id}`, type: 'expiring', title: material?.name || 'Невідомий матеріал', detail: `LOT ${batch.lot_number || '—'} · придатний до ${displayDate(batch.expiration_date)}`, quantity: qty(batch.quantity), priority: 3 });
+    });
+    missingExpiryBatches.forEach(batch => {
+      const material = state.materials.find(item => item.id === batch.material_id);
+      list.push({ key: `missing-${batch.id}`, type: 'missing', title: material?.name || 'Невідомий матеріал', detail: `LOT ${batch.lot_number || '—'} · не вказано термін придатності`, quantity: qty(batch.quantity), priority: 4 });
+    });
+    return list.sort((a, b) => a.priority - b.priority).slice(0, 12);
+  }, [state.stock, state.materials, expiredBatches, expiringBatches, missingExpiryBatches, lowStockItems, zeroStockItems, todayKey]);
+
+  const filteredMaterials = useMemo(() => {
+    let rows = materialRows.filter(row => {
+      const term = search.trim().toLocaleLowerCase('uk-UA');
+      if (term && !`${row.material.name} ${row.material.code || ''} ${row.material.subcategory || ''}`.toLocaleLowerCase('uk-UA').includes(term)) return false;
+      if (stockFilter === 'deficit' && !(row.isLow && row.minimum > 0)) return false;
+      if (stockFilter === 'zero' && !(row.usable <= 0 && row.minimum > 0)) return false;
+      if (categoryFilter && (row.material.subcategory || 'Без категорії') !== categoryFilter) return false;
+      if (alertFilter === 'expired' && row.expired <= 0) return false;
+      if (alertFilter === 'expiring' && row.expiring <= 0) return false;
+      if (alertFilter === 'missing' && row.missingExpiry <= 0) return false;
+      if (alertFilter === 'zero' && !(row.usable <= 0 && row.minimum > 0)) return false;
+      if (alertFilter === 'low' && !(row.isLow && row.minimum > 0)) return false;
+      return true;
+    });
+    rows = rows.slice().sort((a, b) => {
+      if (sortBy === 'name') return String(a.material.name || '').localeCompare(String(b.material.name || ''), 'uk');
+      if (sortBy === 'available') return a.usable - b.usable;
+      return b.deficit - a.deficit || String(a.material.name || '').localeCompare(String(b.material.name || ''), 'uk');
+    });
+    return rows;
+  }, [materialRows, search, stockFilter, categoryFilter, sortBy, alertFilter]);
+
+  useEffect(() => { setPage(1); }, [search, stockFilter, categoryFilter, sortBy, alertFilter]);
+  const pageSize = 8;
+  const pageCount = Math.max(1, Math.ceil(filteredMaterials.length / pageSize));
+  const visibleMaterials = filteredMaterials.slice((page - 1) * pageSize, page * pageSize);
+
+  const recentOperations = state.operations.slice().sort((a, b) => {
+    const dateA = new Date(a.created_at || a.operation_date).getTime() || 0;
+    const dateB = new Date(b.created_at || b.operation_date).getTime() || 0;
+    return dateB - dateA;
+  }).slice(0, 5);
 
   const handleDeleteOp = async () => {
-    if (isDeleting) return;
+    if (!selectedOp || isDeleting) return;
     const linesCount = state.expenses.filter(e => e.operation_id === selectedOp.id).length;
     const confirmed = await askConfirm({
       title: `Видалити операцію ${selectedOp.operation_num}?`,
@@ -178,134 +324,174 @@ const Dashboard = ({ state, dispatch, sessionPin }) => {
     setIsDeleting(true);
     try {
       const result = await callAction('deleteOperation', { operationId: selectedOp.id }, sessionPin);
-      if (!result.success) { alert(result.error || "Помилка видалення операції."); return; }
-
+      if (!result?.success) { alert(result?.error || 'Помилка видалення операції.'); return; }
       dispatch({ type: 'DELETE_OPERATION', payload: selectedOp.id });
       setSelectedOp(null);
-    } catch (e) {
-      console.error(e);
+    } catch (error) {
+      console.error(error);
       alert("Помилка видалення операції: немає з'єднання з сервером.");
     } finally {
       setIsDeleting(false);
     }
   };
 
+  const cardClass = 'rounded-2xl border p-5 shadow-sm transition-colors';
+  const panelClass = 'bg-white border border-slate-200 rounded-2xl p-5 shadow-sm';
+  const unitTotal = trendData.reduce((sum, row) => sum + row.units, 0);
+  const operationTotal = trendData.reduce((sum, row) => sum + row.operations, 0);
+  const alertCount = expiredBatches.length + expiringBatches.length + missingExpiryBatches.length + zeroStockItems.length + lowStockItems.filter(row => row.usable > 0).length;
+
   return (
-    <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700 p-5 rounded-3xl shadow-lg relative overflow-hidden">
-          <div className="absolute top-0 right-0 p-4 opacity-10"><Database size={64}/></div>
-          <div className="flex items-center gap-3 text-slate-400 mb-2 relative z-10"><Database className="text-teal-400" size={18} /><h3 className="font-semibold text-xs uppercase tracking-widest">Загальний залишок</h3></div>
-          <div className="text-3xl font-black text-white relative z-10 tracking-tight">{totalItems} <span className="text-lg text-slate-500 font-medium">шт</span></div>
-          <p className="text-xs text-slate-400 mt-2 relative z-10"><span className="text-teal-400 font-bold">{operationsLast30Days}</span> операцій за останні 30 днів</p>
+    <div className="-mx-2 md:-mx-4 rounded-2xl bg-slate-50 p-4 md:p-6 space-y-6 text-slate-800 animate-in fade-in duration-500">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.2em] text-teal-700 font-bold">CARDIOSTOCK · АНАЛІТИКА ЗАПАСІВ</p>
+          <h2 className="text-2xl md:text-3xl font-black text-slate-900 mt-1">Огляд відділення</h2>
+          <p className="text-sm text-slate-500 mt-1">Використання матеріалів, складські залишки та ризики на основі наявних записів.</p>
         </div>
-        <div className={`border p-5 rounded-3xl shadow-lg relative overflow-hidden ${expiringItems.length > 0 ? 'bg-gradient-to-br from-rose-950 to-slate-900 border-rose-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'}`}>
-          <div className="absolute top-0 right-0 p-4 opacity-10"><Calendar size={64} className={expiringItems.length > 0 ? 'text-rose-500' : 'text-slate-500'}/></div>
-          <div className="flex items-center gap-3 text-slate-400 mb-2 relative z-10"><Calendar className={expiringItems.length > 0 ? 'text-rose-400' : 'text-slate-400'} size={18} /><h3 className="font-semibold text-xs uppercase tracking-widest text-slate-300">FEFO Контроль</h3></div>
-          <div className={`text-3xl font-black tracking-tight relative z-10 ${expiringItems.length > 0 ? 'text-rose-400' : 'text-white'}`}>{expiringItems.length} <span className="text-sm text-slate-400 font-medium tracking-normal">партіям &lt; 30 днів</span></div>
-        </div>
-        <div className={`border p-5 rounded-3xl shadow-lg relative overflow-hidden ${lowStockItems.length > 0 ? 'bg-gradient-to-br from-amber-950 to-slate-900 border-amber-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'}`}>
-          <div className="absolute top-0 right-0 p-4 opacity-10"><AlertTriangle size={64} className={lowStockItems.length > 0 ? 'text-amber-500' : 'text-slate-500'}/></div>
-          <div className="flex items-center gap-3 text-slate-400 mb-2 relative z-10"><AlertTriangle className={lowStockItems.length > 0 ? 'text-amber-400' : 'text-slate-400'} size={18} /><h3 className="font-semibold text-xs uppercase tracking-widest text-slate-300">Дефіцит</h3></div>
-          <div className={`text-3xl font-black tracking-tight relative z-10 ${lowStockItems.length > 0 ? 'text-amber-400' : 'text-white'}`}>{lowStockItems.length} <span className="text-sm text-slate-400 font-medium tracking-normal">позицій &lt; норми</span></div>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => goTo('stockin')} className="px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-sm font-bold flex items-center gap-2"><PackagePlus size={16}/> Оприбуткувати</button>
+          <button onClick={() => goTo('postop')} className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 text-sm font-bold flex items-center gap-2"><Activity size={16}/> Списати після операції</button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl">
-            <h3 className="text-sm font-bold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2"><PieChartIcon className="text-teal-500" size={18}/> Розподіл залишків (шт)</h3>
-            <div className="h-64">
-              {pieData.length > 0 ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={pieData} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
-                      {pieData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
-                    </Pie>
-                    <Tooltip formatter={(value) => value + ' шт'} contentStyle={{backgroundColor: '#0f172a', borderColor: '#1e293b', color: '#fff'}} itemStyle={{color: '#fff'}}/>
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
-              ) : <div className="h-full flex items-center justify-center text-slate-600">Склад порожній</div>}
-            </div>
-         </div>
-         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl">
-            <h3 className="text-sm font-bold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2"><BarChart3 className="text-teal-500" size={18}/> Динаміка операцій (останні 6 міс)</h3>
-            <div className="h-64">
-              {barData.length > 0 ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={barData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                    <XAxis dataKey="name" stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} />
-                    <YAxis stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
-                    <Tooltip cursor={{fill: '#1e293b'}} formatter={(value) => value + ' опер.'} contentStyle={{backgroundColor: '#0f172a', borderColor: '#1e293b', color: '#fff'}}/>
-                    <Bar dataKey="value" fill="#0d9488" radius={[4, 4, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              ) : <div className="h-full flex items-center justify-center text-slate-600">Немає проведених операцій</div>}
-            </div>
-         </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <button onClick={() => { setAlertFilter(''); setStockFilter('all'); goTo('inventory'); }} className={`${cardClass} text-left bg-gradient-to-br from-white to-slate-50 border-slate-200 hover:border-teal-600`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-500">Доступний залишок</span><Database size={19} className="text-teal-700"/></div>
+          <div className="text-3xl font-black text-slate-900 mt-3">{usableTotal.toLocaleString('uk-UA')} <span className="text-sm font-semibold text-slate-500">од.</span></div>
+          <p className="text-xs text-slate-500 mt-2">Без прострочених партій і партій без дати придатності</p>
+        </button>
+        <button onClick={() => { setAlertFilter('expired'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiredBatches.length ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'} hover:border-rose-700`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-500">Прострочені партії</span><AlertTriangle size={19} className="text-rose-700"/></div>
+          <div className="text-3xl font-black text-rose-700 mt-3">{expiredBatches.length}</div>
+          <p className="text-xs text-slate-500 mt-2">Партії з позитивним залишком</p>
+        </button>
+        <button onClick={() => { setAlertFilter('expiring'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiringBatches.length ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'} hover:border-amber-700`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-500">Придатність ≤ 30 днів</span><Calendar size={19} className="text-amber-700"/></div>
+          <div className="text-3xl font-black text-amber-800 mt-3">{expiringBatches.length}</div>
+          <p className="text-xs text-slate-500 mt-2">Включно з партіями, термін яких спливає сьогодні</p>
+        </button>
+        <button onClick={() => { setStockFilter('deficit'); setAlertFilter(''); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${lowStockItems.length ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'} hover:border-amber-700`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-500">Дефіцит</span><Activity size={19} className="text-amber-700"/></div>
+          <div className="text-3xl font-black text-amber-800 mt-3">{lowStockItems.length}</div>
+          <p className="text-xs text-slate-500 mt-2">Позицій нижче мінімального запасу</p>
+        </button>
       </div>
 
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl">
-        <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Activity size={20} className="text-teal-500" /> Останні проведені операції</h3>
+      <div id="dashboard-alerts" className={panelClass}>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <div><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><AlertTriangle size={18} className="text-amber-700"/> Центр ризиків</h3><p className="text-xs text-slate-500 mt-1">{alertCount} типів/випадків ризику за поточними даними</p></div>
+          {alertFilter && <button onClick={() => setAlertFilter('')} className="text-xs font-bold text-teal-700 hover:text-teal-700">Очистити фільтр</button>}
+        </div>
+        {alerts.length ? <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+          {alerts.map(alert => <button key={alert.key} onClick={() => { setAlertFilter(alert.type); setStockFilter('all'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="text-left rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-4 py-3 flex items-start gap-3">
+            <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${alert.type === 'expired' || alert.type === 'zero' ? 'bg-rose-400' : alert.type === 'low' || alert.type === 'expiring' ? 'bg-amber-400' : 'bg-sky-400'}`}/>
+            <span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-800">{alert.title}</span><span className="block text-xs text-slate-500 mt-1">{alert.detail}</span></span>
+            <span className="text-xs font-bold text-slate-700 whitespace-nowrap">{alert.quantity} од.</span>
+          </button>)}
+        </div> : <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800 flex items-center gap-2"><CheckCircle size={18}/> Критичних складських попереджень за наявними даними не виявлено.</div>}
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
+        <div className={`${panelClass} xl:col-span-3`}>
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
+            <div><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><BarChart3 size={18} className="text-teal-700"/> Динаміка списань</h3><p className="text-xs text-slate-500 mt-1">За датою списання; якщо її немає — за датою операції</p></div>
+            <div className="flex flex-wrap gap-2">
+              <select value={period} onChange={event => setPeriod(Number(event.target.value))} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700"><option value={7}>7 днів</option><option value={30}>30 днів</option><option value={90}>90 днів</option></select>
+              <select value={trendMetric} onChange={event => setTrendMetric(event.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700"><option value="units">Кількість списаних одиниць</option><option value="operations">Кількість операцій</option></select>
+            </div>
+          </div>
+          <div className="flex gap-5 mb-3">
+            <div><p className="text-xs text-slate-500">{trendMetric === 'units' ? 'Списано за період' : 'Операцій за період'}</p><p className="text-xl font-black text-slate-900">{trendMetric === 'units' ? unitTotal.toLocaleString('uk-UA') : operationTotal.toLocaleString('uk-UA')}</p></div>
+            <div><p className="text-xs text-slate-500">Операцій за період</p><p className="text-xl font-black text-teal-700">{operationsInPeriod.length}</p></div>
+          </div>
+          <div className="h-64">
+            {trendData.some(row => trendMetric === 'units' ? row.units > 0 : row.operations > 0) ? <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={trendData} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false}/>
+                <XAxis dataKey="label" stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} interval={period === 90 ? 8 : period === 30 ? 4 : 0}/>
+                <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false}/>
+                <Tooltip labelFormatter={(label, payload) => payload?.[0]?.payload?.key || label} formatter={value => [value, trendMetric === 'units' ? 'Одиниць' : 'Операцій']} contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', color: '#0f172a', borderRadius: 12 }}/>
+                <Bar dataKey={trendMetric} name={trendMetric === 'units' ? 'Списано' : 'Операції'} fill="#14b8a6" radius={[4, 4, 0, 0]}/>
+              </BarChart>
+            </ResponsiveContainer> : <div className="h-full flex flex-col items-center justify-center text-slate-500 gap-2"><BarChart3 size={28} className="opacity-40"/><span className="text-sm">За цей період немає записів для графіка</span></div>}
+          </div>
+        </div>
+
+        <div className={`${panelClass} xl:col-span-2`}>
+          <div className="mb-4"><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><PieChartIcon size={18} className="text-sky-700"/> Списання за категоріями</h3><p className="text-xs text-slate-500 mt-1">Натисніть категорію, щоб відфільтрувати таблицю дефіциту</p></div>
+          {categoryData.length ? <div className="space-y-3">
+            {categoryData.slice(0, 7).map((entry, index) => {
+              const max = categoryData[0]?.value || 1;
+              const colors = ['bg-teal-400', 'bg-sky-400', 'bg-violet-400', 'bg-amber-400', 'bg-pink-400', 'bg-indigo-400', 'bg-cyan-400'];
+              return <button key={entry.name} onClick={() => { setCategoryFilter(current => current === entry.name ? '' : entry.name); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`w-full text-left rounded-lg p-2 transition-colors ${categoryFilter === entry.name ? 'bg-slate-100' : 'hover:bg-slate-100'}`}>
+                <div className="flex justify-between gap-3 text-xs mb-1.5"><span className="text-slate-700 truncate">{entry.name}</span><span className="text-slate-900 font-bold">{entry.value.toLocaleString('uk-UA')} од.</span></div>
+                <div className="h-2 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full rounded-full ${colors[index % colors.length]}`} style={{ width: `${Math.max(2, entry.value / max * 100)}%` }}/></div>
+              </button>;
+            })}
+            {categoryFilter && <button onClick={() => setCategoryFilter('')} className="text-xs text-teal-700 hover:text-teal-700 font-bold">Очистити категорію</button>}
+          </div> : <div className="h-48 flex items-center justify-center text-sm text-slate-500">Немає списань за обраний період</div>}
+        </div>
+      </div>
+
+      <div id="dashboard-shortages" className={panelClass}>
+        <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
+          <div><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><Database size={18} className="text-amber-700"/> Контроль залишків і дефіциту</h3><p className="text-xs text-slate-500 mt-1">Доступний залишок враховує лише партії з чинною датою придатності.</p></div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+            <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Пошук матеріалу або коду" className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 placeholder:text-slate-500 min-w-0"/>
+            <select value={stockFilter} onChange={event => setStockFilter(event.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700"><option value="all">Усі позиції</option><option value="deficit">Нижче мінімуму</option><option value="zero">Нульовий доступний залишок</option></select>
+            <select value={sortBy} onChange={event => setSortBy(event.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700"><option value="deficit">Сортувати: дефіцит</option><option value="available">Сортувати: доступний залишок</option><option value="name">Сортувати: назва</option></select>
+            {(categoryFilter || alertFilter || stockFilter !== 'all' || search) && <button onClick={() => { setCategoryFilter(''); setAlertFilter(''); setStockFilter('all'); setSearch(''); }} className="px-3 py-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-100 text-xs font-bold">Скинути фільтри</button>}
+          </div>
+        </div>
+        {(categoryFilter || alertFilter) && <div className="flex flex-wrap gap-2 mb-3">
+          {categoryFilter && <span className="text-xs rounded-full bg-teal-50 text-teal-700 px-3 py-1">Категорія: {categoryFilter}</span>}
+          {alertFilter && <span className="text-xs rounded-full bg-amber-50 text-amber-800 px-3 py-1">Ризик: {({ expired: 'прострочені партії', expiring: 'закінчується термін', missing: 'без терміну придатності', zero: 'нульовий залишок', low: 'дефіцит' })[alertFilter] || alertFilter}</span>}
+        </div>}
         <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left"><thead className="text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-950"><tr><th className="px-4 py-3 rounded-tl-xl">Дата</th><th className="px-4 py-3">№ Опер.</th><th className="px-4 py-3">Пацієнт (ІБ)</th><th className="px-4 py-3 rounded-tr-xl">Тип</th></tr></thead>
-            <tbody className="divide-y divide-slate-800 text-slate-300">
-              {state.operations.slice().sort((a,b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 5).map(op => (
-                <tr key={op.id} onClick={() => setSelectedOp(op)} className="hover:bg-slate-800/50 transition-colors cursor-pointer group">
-                  <td className="px-4 py-4 whitespace-nowrap">{fmtDateUk(op.operation_date)}</td>
-                  <td className="px-4 py-4 font-mono text-teal-400 font-bold group-hover:text-teal-300">{op.operation_num}</td>
-                  <td className="px-4 py-4 font-medium">{op.patient_case_id || '—'}</td>
-                  <td className="px-4 py-4 text-slate-400">{op.operation_type || '—'}</td>
-                </tr>
-              ))}
-              {state.operations.length === 0 && <tr><td colSpan="4" className="px-4 py-12 text-center text-slate-500">Історія операцій порожня</td></tr>}
+          <table className="w-full text-sm text-left min-w-[700px]">
+            <thead className="text-[10px] uppercase tracking-widest text-slate-500 bg-slate-50"><tr><th className="px-3 py-3 rounded-tl-lg">Матеріал</th><th className="px-3 py-3">Категорія</th><th className="px-3 py-3 text-right">Доступно</th><th className="px-3 py-3 text-right">Мінімум</th><th className="px-3 py-3 text-right">Дефіцит</th><th className="px-3 py-3">Стан</th></tr></thead>
+            <tbody className="divide-y divide-slate-200">
+              {visibleMaterials.map(row => <tr key={row.material.id} className="hover:bg-slate-50">
+                <td className="px-3 py-3"><div className="font-semibold text-slate-800">{row.material.name}</div><div className="text-[10px] text-slate-500 font-mono">{row.material.code || 'Без коду'}</div></td>
+                <td className="px-3 py-3 text-slate-500">{row.material.subcategory || 'Без категорії'}</td>
+                <td className="px-3 py-3 text-right font-bold text-slate-900">{row.usable.toLocaleString('uk-UA')}</td>
+                <td className="px-3 py-3 text-right text-slate-500">{row.minimum.toLocaleString('uk-UA')}</td>
+                <td className={`px-3 py-3 text-right font-black ${row.deficit > 0 ? 'text-amber-800' : 'text-emerald-800'}`}>{row.deficit.toLocaleString('uk-UA')}</td>
+                <td className="px-3 py-3">{row.expired > 0 ? <span className="text-[10px] rounded-full bg-rose-50 text-rose-700 px-2 py-1">Є прострочене</span> : row.missingExpiry > 0 ? <span className="text-[10px] rounded-full bg-sky-50 text-sky-700 px-2 py-1">Немає терміну</span> : row.isLow && row.minimum > 0 ? <span className="text-[10px] rounded-full bg-amber-50 text-amber-800 px-2 py-1">Дефіцит</span> : row.expiring > 0 ? <span className="text-[10px] rounded-full bg-orange-50 text-orange-800 px-2 py-1">Скоро спливає</span> : <span className="text-[10px] rounded-full bg-emerald-50 text-emerald-800 px-2 py-1">У нормі</span>}</td>
+              </tr>)}
+              {!visibleMaterials.length && <tr><td colSpan="6" className="px-4 py-10 text-center text-slate-500">За цими фільтрами позицій не знайдено.</td></tr>}
             </tbody>
           </table>
         </div>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mt-4">
+          <p className="text-xs text-slate-500">Позицій: {filteredMaterials.length} · Загальний облікований залишок: {totalRecorded.toLocaleString('uk-UA')} од.</p>
+          <div className="flex items-center gap-2"><button disabled={page <= 1} onClick={() => setPage(value => Math.max(1, value - 1))} className="px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-slate-700 disabled:opacity-40 text-xs">Назад</button><span className="text-xs text-slate-500">Сторінка {Math.min(page, pageCount)} з {pageCount}</span><button disabled={page >= pageCount} onClick={() => setPage(value => Math.min(pageCount, value + 1))} className="px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-slate-700 disabled:opacity-40 text-xs">Далі</button></div>
+        </div>
       </div>
 
-      {selectedOp && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex justify-center items-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-             <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-950">
-                <h3 className="text-lg font-bold text-white flex items-center gap-2"><Activity className="text-teal-500"/> Деталі операції {selectedOp.operation_num}</h3>
-                <button onClick={()=>setSelectedOp(null)} className="text-slate-400 hover:text-white bg-slate-800 p-2 rounded-full"><X size={18}/></button>
-             </div>
-             <div className="p-6 space-y-4">
-                <div className="grid grid-cols-2 gap-4 text-sm">
-                   <div><p className="text-slate-500 text-xs uppercase tracking-widest mb-1">Дата</p><p className="font-bold text-white">{fmtDateUk(selectedOp.operation_date)}</p></div>
-                   <div><p className="text-slate-500 text-xs uppercase tracking-widest mb-1">ІБ Пацієнта</p><p className="font-bold text-white">{selectedOp.patient_case_id || '—'}</p></div>
-                   <div className="col-span-2"><p className="text-slate-500 text-xs uppercase tracking-widest mb-1">Тип втручання</p><p className="font-bold text-white">{selectedOp.operation_type || '—'}</p></div>
-                </div>
-                <div className="mt-4 pt-4 border-t border-slate-800">
-                   <p className="text-slate-500 text-xs uppercase tracking-widest mb-3 font-bold">Списані матеріали</p>
-                   <div className="space-y-2 max-h-48 overflow-y-auto pr-2">
-                      {state.expenses.filter(e => e.operation_id === selectedOp.id).map(exp => {
-                         const batch = state.stock.find(s => s.id === exp.stock_batch_id) || state.writeoffs.find(w=>w.id === exp.stock_batch_id);
-                         const mat = state.materials.find(m => m.id === batch?.material_id);
-                         return (
-                           <div key={exp.id} className="flex justify-between items-center bg-slate-950 p-3 rounded-xl border border-slate-800">
-                             <div>
-                               <p className="text-sm font-bold text-white">{mat?.name || 'Невідомий матеріал'}</p>
-                               <div className="flex gap-2 items-center mt-1">
-                                  {batch?.size && <span className="text-[10px] bg-teal-900/30 text-teal-400 px-1.5 rounded font-bold">Р: {batch.size}</span>}
-                                  <span className="text-[10px] text-slate-400 font-mono">LOT: {batch?.lot_number || '-'}</span>
-                               </div>
-                             </div>
-                             <div className="font-black text-teal-400">{exp.quantity} шт</div>
-                           </div>
-                         )
-                      })}
-                   </div>
-                </div>
-             </div>
-             <div className="p-5 border-t border-slate-800 bg-slate-950/50 flex gap-3">
-                <button onClick={handleDeleteOp} disabled={isDeleting} className="flex-1 bg-rose-950 text-rose-400 hover:bg-rose-900 hover:text-white py-3 rounded-xl font-bold flex justify-center items-center gap-2 transition-colors border border-rose-900/50 disabled:opacity-50 disabled:cursor-not-allowed"><Trash2 size={18}/> {isDeleting ? 'Видалення...' : 'Скасувати та видалити'}</button>
-             </div>
-          </div>
+      <div className={panelClass}>
+        <div className="flex items-center justify-between mb-4"><div><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><Activity size={18} className="text-teal-700"/> Останні операції</h3><p className="text-xs text-slate-500 mt-1">Відкрийте запис, щоб переглянути списані матеріали</p></div><button onClick={() => goTo('postop')} className="text-xs font-bold text-teal-700 hover:text-teal-700">Перейти до списання →</button></div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm text-left min-w-[580px]"><thead className="text-[10px] uppercase tracking-widest text-slate-500 bg-slate-50"><tr><th className="px-3 py-3">Дата</th><th className="px-3 py-3">№ операції</th><th className="px-3 py-3">ІБ пацієнта</th><th className="px-3 py-3">Тип втручання</th></tr></thead><tbody className="divide-y divide-slate-200 text-slate-700">
+            {recentOperations.map(op => <tr key={op.id} onClick={() => setSelectedOp(op)} className="cursor-pointer hover:bg-slate-100"><td className="px-3 py-3 whitespace-nowrap">{displayDate(op.operation_date)}</td><td className="px-3 py-3 font-mono font-bold text-teal-700">{op.operation_num || '—'}</td><td className="px-3 py-3">{op.patient_case_id || '—'}</td><td className="px-3 py-3">{op.operation_type || '—'}</td></tr>)}
+            {!recentOperations.length && <tr><td colSpan="4" className="px-4 py-10 text-center text-slate-500">Історія операцій порожня.</td></tr>}
+          </tbody></table>
         </div>
-      )}
+      </div>
+
+      {selectedOp && <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex justify-center items-center p-4" onClick={() => !isDeleting && setSelectedOp(null)}>
+        <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden" onClick={event => event.stopPropagation()}>
+          <div className="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50"><h3 className="text-lg font-bold text-slate-900 flex items-center gap-2"><Activity className="text-teal-500"/> Операція {selectedOp.operation_num || ''}</h3><button onClick={() => setSelectedOp(null)} className="text-slate-500 hover:text-slate-900 bg-slate-100 p-2 rounded-full" aria-label="Закрити"><X size={18}/></button></div>
+          <div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4 text-sm"><div><p className="text-slate-500 text-xs uppercase mb-1">Дата</p><p className="font-bold text-slate-900">{displayDate(selectedOp.operation_date)}</p></div><div><p className="text-slate-500 text-xs uppercase mb-1">ІБ пацієнта</p><p className="font-bold text-slate-900">{selectedOp.patient_case_id || '—'}</p></div><div className="col-span-2"><p className="text-slate-500 text-xs uppercase mb-1">Тип втручання</p><p className="font-bold text-slate-900">{selectedOp.operation_type || '—'}</p></div></div>
+            <div className="pt-4 border-t border-slate-200"><p className="text-slate-500 text-xs uppercase mb-3 font-bold">Списані матеріали</p><div className="space-y-2 max-h-48 overflow-y-auto">
+              {state.expenses.filter(expense => expense.operation_id === selectedOp.id).map(expense => { const batch = state.stock.find(item => item.id === expense.stock_batch_id) || state.writeoffs.find(item => item.id === expense.stock_batch_id); const material = state.materials.find(item => item.id === batch?.material_id); return <div key={expense.id} className="flex justify-between gap-3 items-center bg-slate-50 p-3 rounded-xl border border-slate-200"><div><p className="text-sm font-bold text-slate-900">{material?.name || 'Невідомий матеріал'}</p><p className="text-[10px] text-slate-500 mt-1">LOT: {batch?.lot_number || '—'} {batch?.size ? `· Розмір: ${batch.size}` : ''}</p></div><span className="font-black text-teal-700 whitespace-nowrap">{qty(expense.quantity)} од.</span></div>; })}
+              {!state.expenses.some(expense => expense.operation_id === selectedOp.id) && <p className="text-sm text-slate-500">Для цієї операції немає записів списання.</p>}
+            </div></div>
+          </div>
+          <div className="p-5 border-t border-slate-200 bg-slate-50"><button onClick={handleDeleteOp} disabled={isDeleting} className="w-full bg-rose-50 text-rose-700 hover:bg-rose-100 hover:text-rose-800 py-3 rounded-xl font-bold flex justify-center items-center gap-2 border border-rose-200 disabled:opacity-50"><Trash2 size={18}/>{isDeleting ? 'Видалення…' : 'Скасувати та видалити операцію'}</button></div>
+        </div>
+      </div>}
       {confirmDialog}
     </div>
   );
@@ -2357,7 +2543,7 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-4 md:px-8 py-6 md:py-10">
         <ErrorBoundary resetKey={currentTab}>
-          {currentTab === 'dashboard' && hasAccess('dashboard') && <Dashboard state={state} dispatch={dispatch} sessionPin={sessionPin} />}
+          {currentTab === 'dashboard' && hasAccess('dashboard') && <Dashboard state={state} dispatch={dispatch} sessionPin={sessionPin} setActiveTab={setActiveTab} />}
           {currentTab === 'postop' && hasAccess('postop') && <PostOpExpense state={state} dispatch={dispatch} sessionPin={sessionPin} />}
           {currentTab === 'stockin' && hasAccess('stockin') && <StockIn state={state} dispatch={dispatch} sessionPin={sessionPin} />}
           {currentTab === 'catalog' && hasAccess('catalog') && <Catalog state={state} dispatch={dispatch} sessionPin={sessionPin} />}
