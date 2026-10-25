@@ -335,161 +335,161 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
     }
   };
 
-  const cardClass = 'rounded-2xl border p-5 shadow-sm transition-colors';
-  const panelClass = 'bg-white border border-slate-200 rounded-2xl p-5 shadow-sm';
+  const cardClass = 'rounded-3xl border p-5 shadow-lg transition-colors';
+  const panelClass = 'bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl';
   const unitTotal = trendData.reduce((sum, row) => sum + row.units, 0);
   const operationTotal = trendData.reduce((sum, row) => sum + row.operations, 0);
   const alertCount = expiredBatches.length + expiringBatches.length + missingExpiryBatches.length + zeroStockItems.length + lowStockItems.filter(row => row.usable > 0).length;
 
   return (
-    <div className="-mx-2 md:-mx-4 rounded-2xl bg-slate-50 p-4 md:p-6 space-y-6 text-slate-800 animate-in fade-in duration-500">
+    <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="text-xs uppercase tracking-[0.2em] text-teal-700 font-bold">CARDIOSTOCK · АНАЛІТИКА ЗАПАСІВ</p>
-          <h2 className="text-2xl md:text-3xl font-black text-slate-900 mt-1">Огляд відділення</h2>
-          <p className="text-sm text-slate-500 mt-1">Використання матеріалів, складські залишки та ризики на основі наявних записів.</p>
+          <p className="text-xs uppercase tracking-[0.2em] text-teal-400 font-bold">CARDIOSTOCK · АНАЛІТИКА ЗАПАСІВ</p>
+          <h2 className="text-2xl md:text-3xl font-black text-white mt-1">Огляд відділення</h2>
+          <p className="text-sm text-slate-400 mt-1">Використання матеріалів, складські залишки та ризики на основі наявних записів.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button onClick={() => goTo('stockin')} className="px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-sm font-bold flex items-center gap-2"><PackagePlus size={16}/> Оприбуткувати</button>
-          <button onClick={() => goTo('postop')} className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 text-sm font-bold flex items-center gap-2"><Activity size={16}/> Списати після операції</button>
+          <button onClick={() => goTo('stockin')} className="px-4 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-sm font-bold flex items-center gap-2"><PackagePlus size={16}/> Оприбуткувати</button>
+          <button onClick={() => goTo('postop')} className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-sm font-bold flex items-center gap-2"><Activity size={16}/> Списати після операції</button>
         </div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <button onClick={() => { setAlertFilter(''); setStockFilter('all'); goTo('inventory'); }} className={`${cardClass} text-left bg-gradient-to-br from-white to-slate-50 border-slate-200 hover:border-teal-600`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-500">Доступний залишок</span><Database size={19} className="text-teal-700"/></div>
-          <div className="text-3xl font-black text-slate-900 mt-3">{usableTotal.toLocaleString('uk-UA')} <span className="text-sm font-semibold text-slate-500">од.</span></div>
-          <p className="text-xs text-slate-500 mt-2">Без прострочених партій і партій без дати придатності</p>
+        <button onClick={() => { setAlertFilter(''); setStockFilter('all'); goTo('inventory'); }} className={`${cardClass} text-left bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700 hover:border-teal-500`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Доступний залишок</span><Database size={19} className="text-teal-400"/></div>
+          <div className="text-3xl font-black text-white mt-3">{usableTotal.toLocaleString('uk-UA')} <span className="text-sm font-semibold text-slate-400">од.</span></div>
+          <p className="text-xs text-slate-400 mt-2">Без прострочених партій і партій без дати придатності</p>
         </button>
-        <button onClick={() => { setAlertFilter('expired'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiredBatches.length ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'} hover:border-rose-700`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-500">Прострочені партії</span><AlertTriangle size={19} className="text-rose-700"/></div>
-          <div className="text-3xl font-black text-rose-700 mt-3">{expiredBatches.length}</div>
-          <p className="text-xs text-slate-500 mt-2">Партії з позитивним залишком</p>
+        <button onClick={() => { setAlertFilter('expired'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiredBatches.length ? 'bg-gradient-to-br from-rose-950 to-slate-900 border-rose-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'} hover:border-rose-500`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Прострочені партії</span><AlertTriangle size={19} className="text-rose-400"/></div>
+          <div className="text-3xl font-black text-rose-400 mt-3">{expiredBatches.length}</div>
+          <p className="text-xs text-slate-400 mt-2">Партії з позитивним залишком</p>
         </button>
-        <button onClick={() => { setAlertFilter('expiring'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiringBatches.length ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'} hover:border-amber-700`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-500">Придатність ≤ 30 днів</span><Calendar size={19} className="text-amber-700"/></div>
-          <div className="text-3xl font-black text-amber-800 mt-3">{expiringBatches.length}</div>
-          <p className="text-xs text-slate-500 mt-2">Включно з партіями, термін яких спливає сьогодні</p>
+        <button onClick={() => { setAlertFilter('expiring'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiringBatches.length ? 'bg-gradient-to-br from-amber-950 to-slate-900 border-amber-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'} hover:border-amber-500`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Придатність ≤ 30 днів</span><Calendar size={19} className="text-amber-400"/></div>
+          <div className="text-3xl font-black text-amber-400 mt-3">{expiringBatches.length}</div>
+          <p className="text-xs text-slate-400 mt-2">Включно з партіями, термін яких спливає сьогодні</p>
         </button>
-        <button onClick={() => { setStockFilter('deficit'); setAlertFilter(''); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${lowStockItems.length ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'} hover:border-amber-700`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-500">Дефіцит</span><Activity size={19} className="text-amber-700"/></div>
-          <div className="text-3xl font-black text-amber-800 mt-3">{lowStockItems.length}</div>
-          <p className="text-xs text-slate-500 mt-2">Позицій нижче мінімального запасу</p>
+        <button onClick={() => { setStockFilter('deficit'); setAlertFilter(''); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${lowStockItems.length ? 'bg-gradient-to-br from-amber-950 to-slate-900 border-amber-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'} hover:border-amber-500`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Дефіцит</span><Activity size={19} className="text-amber-400"/></div>
+          <div className="text-3xl font-black text-amber-400 mt-3">{lowStockItems.length}</div>
+          <p className="text-xs text-slate-400 mt-2">Позицій нижче мінімального запасу</p>
         </button>
       </div>
 
       <div id="dashboard-alerts" className={panelClass}>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-          <div><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><AlertTriangle size={18} className="text-amber-700"/> Центр ризиків</h3><p className="text-xs text-slate-500 mt-1">{alertCount} типів/випадків ризику за поточними даними</p></div>
-          {alertFilter && <button onClick={() => setAlertFilter('')} className="text-xs font-bold text-teal-700 hover:text-teal-700">Очистити фільтр</button>}
+          <div><h3 className="text-base font-bold text-white flex items-center gap-2"><AlertTriangle size={18} className="text-amber-400"/> Центр ризиків</h3><p className="text-xs text-slate-400 mt-1">{alertCount} типів/випадків ризику за поточними даними</p></div>
+          {alertFilter && <button onClick={() => setAlertFilter('')} className="text-xs font-bold text-teal-400 hover:text-teal-300">Очистити фільтр</button>}
         </div>
         {alerts.length ? <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-          {alerts.map(alert => <button key={alert.key} onClick={() => { setAlertFilter(alert.type); setStockFilter('all'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="text-left rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-4 py-3 flex items-start gap-3">
+          {alerts.map(alert => <button key={alert.key} onClick={() => { setAlertFilter(alert.type); setStockFilter('all'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="text-left rounded-xl border border-slate-800 bg-slate-950 hover:bg-slate-800/60 px-4 py-3 flex items-start gap-3">
             <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${alert.type === 'expired' || alert.type === 'zero' ? 'bg-rose-400' : alert.type === 'low' || alert.type === 'expiring' ? 'bg-amber-400' : 'bg-sky-400'}`}/>
-            <span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-800">{alert.title}</span><span className="block text-xs text-slate-500 mt-1">{alert.detail}</span></span>
-            <span className="text-xs font-bold text-slate-700 whitespace-nowrap">{alert.quantity} од.</span>
+            <span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-200">{alert.title}</span><span className="block text-xs text-slate-400 mt-1">{alert.detail}</span></span>
+            <span className="text-xs font-bold text-slate-300 whitespace-nowrap">{alert.quantity} од.</span>
           </button>)}
-        </div> : <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800 flex items-center gap-2"><CheckCircle size={18}/> Критичних складських попереджень за наявними даними не виявлено.</div>}
+        </div> : <div className="rounded-xl border border-emerald-900/50 bg-emerald-950/50 p-4 text-sm text-emerald-400 flex items-center gap-2"><CheckCircle size={18}/> Критичних складських попереджень за наявними даними не виявлено.</div>}
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
         <div className={`${panelClass} xl:col-span-3`}>
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
-            <div><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><BarChart3 size={18} className="text-teal-700"/> Динаміка списань</h3><p className="text-xs text-slate-500 mt-1">За датою списання; якщо її немає — за датою операції</p></div>
+            <div><h3 className="text-base font-bold text-white flex items-center gap-2"><BarChart3 size={18} className="text-teal-400"/> Динаміка списань</h3><p className="text-xs text-slate-400 mt-1">За датою списання; якщо її немає — за датою операції</p></div>
             <div className="flex flex-wrap gap-2">
-              <select value={period} onChange={event => setPeriod(Number(event.target.value))} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700"><option value={7}>7 днів</option><option value={30}>30 днів</option><option value={90}>90 днів</option></select>
-              <select value={trendMetric} onChange={event => setTrendMetric(event.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700"><option value="units">Кількість списаних одиниць</option><option value="operations">Кількість операцій</option></select>
+              <select value={period} onChange={event => setPeriod(Number(event.target.value))} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-300"><option value={7}>7 днів</option><option value={30}>30 днів</option><option value={90}>90 днів</option></select>
+              <select value={trendMetric} onChange={event => setTrendMetric(event.target.value)} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-300"><option value="units">Кількість списаних одиниць</option><option value="operations">Кількість операцій</option></select>
             </div>
           </div>
           <div className="flex gap-5 mb-3">
-            <div><p className="text-xs text-slate-500">{trendMetric === 'units' ? 'Списано за період' : 'Операцій за період'}</p><p className="text-xl font-black text-slate-900">{trendMetric === 'units' ? unitTotal.toLocaleString('uk-UA') : operationTotal.toLocaleString('uk-UA')}</p></div>
-            <div><p className="text-xs text-slate-500">Операцій за період</p><p className="text-xl font-black text-teal-700">{operationsInPeriod.length}</p></div>
+            <div><p className="text-xs text-slate-400">{trendMetric === 'units' ? 'Списано за період' : 'Операцій за період'}</p><p className="text-xl font-black text-white">{trendMetric === 'units' ? unitTotal.toLocaleString('uk-UA') : operationTotal.toLocaleString('uk-UA')}</p></div>
+            <div><p className="text-xs text-slate-400">Операцій за період</p><p className="text-xl font-black text-teal-400">{operationsInPeriod.length}</p></div>
           </div>
           <div className="h-64">
             {trendData.some(row => trendMetric === 'units' ? row.units > 0 : row.operations > 0) ? <ResponsiveContainer width="100%" height="100%">
               <BarChart data={trendData} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false}/>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false}/>
                 <XAxis dataKey="label" stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} interval={period === 90 ? 8 : period === 30 ? 4 : 0}/>
                 <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false}/>
-                <Tooltip labelFormatter={(label, payload) => payload?.[0]?.payload?.key || label} formatter={value => [value, trendMetric === 'units' ? 'Одиниць' : 'Операцій']} contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', color: '#0f172a', borderRadius: 12 }}/>
+                <Tooltip cursor={{ fill: '#1e293b' }} labelStyle={{ color: '#cbd5e1' }} itemStyle={{ color: '#fff' }} labelFormatter={(label, payload) => payload?.[0]?.payload?.key || label} formatter={value => [value, trendMetric === 'units' ? 'Одиниць' : 'Операцій']} contentStyle={{ backgroundColor: '#0f172a', borderColor: '#1e293b', color: '#fff', borderRadius: 12 }}/>
                 <Bar dataKey={trendMetric} name={trendMetric === 'units' ? 'Списано' : 'Операції'} fill="#14b8a6" radius={[4, 4, 0, 0]}/>
               </BarChart>
-            </ResponsiveContainer> : <div className="h-full flex flex-col items-center justify-center text-slate-500 gap-2"><BarChart3 size={28} className="opacity-40"/><span className="text-sm">За цей період немає записів для графіка</span></div>}
+            </ResponsiveContainer> : <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-2"><BarChart3 size={28} className="opacity-40"/><span className="text-sm">За цей період немає записів для графіка</span></div>}
           </div>
         </div>
 
         <div className={`${panelClass} xl:col-span-2`}>
-          <div className="mb-4"><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><PieChartIcon size={18} className="text-sky-700"/> Списання за категоріями</h3><p className="text-xs text-slate-500 mt-1">Натисніть категорію, щоб відфільтрувати таблицю дефіциту</p></div>
+          <div className="mb-4"><h3 className="text-base font-bold text-white flex items-center gap-2"><PieChartIcon size={18} className="text-sky-400"/> Списання за категоріями</h3><p className="text-xs text-slate-400 mt-1">Натисніть категорію, щоб відфільтрувати таблицю дефіциту</p></div>
           {categoryData.length ? <div className="space-y-3">
             {categoryData.slice(0, 7).map((entry, index) => {
               const max = categoryData[0]?.value || 1;
               const colors = ['bg-teal-400', 'bg-sky-400', 'bg-violet-400', 'bg-amber-400', 'bg-pink-400', 'bg-indigo-400', 'bg-cyan-400'];
-              return <button key={entry.name} onClick={() => { setCategoryFilter(current => current === entry.name ? '' : entry.name); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`w-full text-left rounded-lg p-2 transition-colors ${categoryFilter === entry.name ? 'bg-slate-100' : 'hover:bg-slate-100'}`}>
-                <div className="flex justify-between gap-3 text-xs mb-1.5"><span className="text-slate-700 truncate">{entry.name}</span><span className="text-slate-900 font-bold">{entry.value.toLocaleString('uk-UA')} од.</span></div>
-                <div className="h-2 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full rounded-full ${colors[index % colors.length]}`} style={{ width: `${Math.max(2, entry.value / max * 100)}%` }}/></div>
+              return <button key={entry.name} onClick={() => { setCategoryFilter(current => current === entry.name ? '' : entry.name); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`w-full text-left rounded-lg p-2 transition-colors ${categoryFilter === entry.name ? 'bg-slate-800' : 'hover:bg-slate-800/50'}`}>
+                <div className="flex justify-between gap-3 text-xs mb-1.5"><span className="text-slate-300 truncate">{entry.name}</span><span className="text-white font-bold">{entry.value.toLocaleString('uk-UA')} од.</span></div>
+                <div className="h-2 rounded-full bg-slate-800 overflow-hidden"><div className={`h-full rounded-full ${colors[index % colors.length]}`} style={{ width: `${Math.max(2, entry.value / max * 100)}%` }}/></div>
               </button>;
             })}
-            {categoryFilter && <button onClick={() => setCategoryFilter('')} className="text-xs text-teal-700 hover:text-teal-700 font-bold">Очистити категорію</button>}
-          </div> : <div className="h-48 flex items-center justify-center text-sm text-slate-500">Немає списань за обраний період</div>}
+            {categoryFilter && <button onClick={() => setCategoryFilter('')} className="text-xs text-teal-400 hover:text-teal-300 font-bold">Очистити категорію</button>}
+          </div> : <div className="h-48 flex items-center justify-center text-sm text-slate-400">Немає списань за обраний період</div>}
         </div>
       </div>
 
       <div id="dashboard-shortages" className={panelClass}>
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
-          <div><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><Database size={18} className="text-amber-700"/> Контроль залишків і дефіциту</h3><p className="text-xs text-slate-500 mt-1">Доступний залишок враховує лише партії з чинною датою придатності.</p></div>
+          <div><h3 className="text-base font-bold text-white flex items-center gap-2"><Database size={18} className="text-amber-400"/> Контроль залишків і дефіциту</h3><p className="text-xs text-slate-400 mt-1">Доступний залишок враховує лише партії з чинною датою придатності.</p></div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-            <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Пошук матеріалу або коду" className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 placeholder:text-slate-500 min-w-0"/>
-            <select value={stockFilter} onChange={event => setStockFilter(event.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700"><option value="all">Усі позиції</option><option value="deficit">Нижче мінімуму</option><option value="zero">Нульовий доступний залишок</option></select>
-            <select value={sortBy} onChange={event => setSortBy(event.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700"><option value="deficit">Сортувати: дефіцит</option><option value="available">Сортувати: доступний залишок</option><option value="name">Сортувати: назва</option></select>
-            {(categoryFilter || alertFilter || stockFilter !== 'all' || search) && <button onClick={() => { setCategoryFilter(''); setAlertFilter(''); setStockFilter('all'); setSearch(''); }} className="px-3 py-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-100 text-xs font-bold">Скинути фільтри</button>}
+            <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Пошук матеріалу або коду" className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 min-w-0"/>
+            <select value={stockFilter} onChange={event => setStockFilter(event.target.value)} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300"><option value="all">Усі позиції</option><option value="deficit">Нижче мінімуму</option><option value="zero">Нульовий доступний залишок</option></select>
+            <select value={sortBy} onChange={event => setSortBy(event.target.value)} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300"><option value="deficit">Сортувати: дефіцит</option><option value="available">Сортувати: доступний залишок</option><option value="name">Сортувати: назва</option></select>
+            {(categoryFilter || alertFilter || stockFilter !== 'all' || search) && <button onClick={() => { setCategoryFilter(''); setAlertFilter(''); setStockFilter('all'); setSearch(''); }} className="px-3 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs font-bold">Скинути фільтри</button>}
           </div>
         </div>
         {(categoryFilter || alertFilter) && <div className="flex flex-wrap gap-2 mb-3">
-          {categoryFilter && <span className="text-xs rounded-full bg-teal-50 text-teal-700 px-3 py-1">Категорія: {categoryFilter}</span>}
-          {alertFilter && <span className="text-xs rounded-full bg-amber-50 text-amber-800 px-3 py-1">Ризик: {({ expired: 'прострочені партії', expiring: 'закінчується термін', missing: 'без терміну придатності', zero: 'нульовий залишок', low: 'дефіцит' })[alertFilter] || alertFilter}</span>}
+          {categoryFilter && <span className="text-xs rounded-full bg-teal-900/30 text-teal-400 px-3 py-1">Категорія: {categoryFilter}</span>}
+          {alertFilter && <span className="text-xs rounded-full bg-amber-950/50 text-amber-400 px-3 py-1">Ризик: {({ expired: 'прострочені партії', expiring: 'закінчується термін', missing: 'без терміну придатності', zero: 'нульовий залишок', low: 'дефіцит' })[alertFilter] || alertFilter}</span>}
         </div>}
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left min-w-[700px]">
-            <thead className="text-[10px] uppercase tracking-widest text-slate-500 bg-slate-50"><tr><th className="px-3 py-3 rounded-tl-lg">Матеріал</th><th className="px-3 py-3">Категорія</th><th className="px-3 py-3 text-right">Доступно</th><th className="px-3 py-3 text-right">Мінімум</th><th className="px-3 py-3 text-right">Дефіцит</th><th className="px-3 py-3">Стан</th></tr></thead>
-            <tbody className="divide-y divide-slate-200">
-              {visibleMaterials.map(row => <tr key={row.material.id} className="hover:bg-slate-50">
-                <td className="px-3 py-3"><div className="font-semibold text-slate-800">{row.material.name}</div><div className="text-[10px] text-slate-500 font-mono">{row.material.code || 'Без коду'}</div></td>
-                <td className="px-3 py-3 text-slate-500">{row.material.subcategory || 'Без категорії'}</td>
-                <td className="px-3 py-3 text-right font-bold text-slate-900">{row.usable.toLocaleString('uk-UA')}</td>
-                <td className="px-3 py-3 text-right text-slate-500">{row.minimum.toLocaleString('uk-UA')}</td>
-                <td className={`px-3 py-3 text-right font-black ${row.deficit > 0 ? 'text-amber-800' : 'text-emerald-800'}`}>{row.deficit.toLocaleString('uk-UA')}</td>
-                <td className="px-3 py-3">{row.expired > 0 ? <span className="text-[10px] rounded-full bg-rose-50 text-rose-700 px-2 py-1">Є прострочене</span> : row.missingExpiry > 0 ? <span className="text-[10px] rounded-full bg-sky-50 text-sky-700 px-2 py-1">Немає терміну</span> : row.isLow && row.minimum > 0 ? <span className="text-[10px] rounded-full bg-amber-50 text-amber-800 px-2 py-1">Дефіцит</span> : row.expiring > 0 ? <span className="text-[10px] rounded-full bg-orange-50 text-orange-800 px-2 py-1">Скоро спливає</span> : <span className="text-[10px] rounded-full bg-emerald-50 text-emerald-800 px-2 py-1">У нормі</span>}</td>
+            <thead className="text-[10px] uppercase tracking-widest text-slate-400 bg-slate-950"><tr><th className="px-3 py-3 rounded-tl-lg">Матеріал</th><th className="px-3 py-3">Категорія</th><th className="px-3 py-3 text-right">Доступно</th><th className="px-3 py-3 text-right">Мінімум</th><th className="px-3 py-3 text-right">Дефіцит</th><th className="px-3 py-3">Стан</th></tr></thead>
+            <tbody className="divide-y divide-slate-800">
+              {visibleMaterials.map(row => <tr key={row.material.id} className="hover:bg-slate-800/50">
+                <td className="px-3 py-3"><div className="font-semibold text-slate-200">{row.material.name}</div><div className="text-[10px] text-slate-400 font-mono">{row.material.code || 'Без коду'}</div></td>
+                <td className="px-3 py-3 text-slate-400">{row.material.subcategory || 'Без категорії'}</td>
+                <td className="px-3 py-3 text-right font-bold text-white">{row.usable.toLocaleString('uk-UA')}</td>
+                <td className="px-3 py-3 text-right text-slate-400">{row.minimum.toLocaleString('uk-UA')}</td>
+                <td className={`px-3 py-3 text-right font-black ${row.deficit > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>{row.deficit.toLocaleString('uk-UA')}</td>
+                <td className="px-3 py-3">{row.expired > 0 ? <span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Є прострочене</span> : row.missingExpiry > 0 ? <span className="text-[10px] rounded-full bg-sky-950/50 text-sky-400 px-2 py-1">Немає терміну</span> : row.isLow && row.minimum > 0 ? <span className="text-[10px] rounded-full bg-amber-950/50 text-amber-400 px-2 py-1">Дефіцит</span> : row.expiring > 0 ? <span className="text-[10px] rounded-full bg-orange-950/50 text-orange-400 px-2 py-1">Скоро спливає</span> : <span className="text-[10px] rounded-full bg-emerald-950/50 text-emerald-400 px-2 py-1">У нормі</span>}</td>
               </tr>)}
-              {!visibleMaterials.length && <tr><td colSpan="6" className="px-4 py-10 text-center text-slate-500">За цими фільтрами позицій не знайдено.</td></tr>}
+              {!visibleMaterials.length && <tr><td colSpan="6" className="px-4 py-10 text-center text-slate-400">За цими фільтрами позицій не знайдено.</td></tr>}
             </tbody>
           </table>
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mt-4">
-          <p className="text-xs text-slate-500">Позицій: {filteredMaterials.length} · Загальний облікований залишок: {totalRecorded.toLocaleString('uk-UA')} од.</p>
-          <div className="flex items-center gap-2"><button disabled={page <= 1} onClick={() => setPage(value => Math.max(1, value - 1))} className="px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-slate-700 disabled:opacity-40 text-xs">Назад</button><span className="text-xs text-slate-500">Сторінка {Math.min(page, pageCount)} з {pageCount}</span><button disabled={page >= pageCount} onClick={() => setPage(value => Math.min(pageCount, value + 1))} className="px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-slate-700 disabled:opacity-40 text-xs">Далі</button></div>
+          <p className="text-xs text-slate-400">Позицій: {filteredMaterials.length} · Загальний облікований залишок: {totalRecorded.toLocaleString('uk-UA')} од.</p>
+          <div className="flex items-center gap-2"><button disabled={page <= 1} onClick={() => setPage(value => Math.max(1, value - 1))} className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 disabled:opacity-40 text-xs">Назад</button><span className="text-xs text-slate-400">Сторінка {Math.min(page, pageCount)} з {pageCount}</span><button disabled={page >= pageCount} onClick={() => setPage(value => Math.min(pageCount, value + 1))} className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 disabled:opacity-40 text-xs">Далі</button></div>
         </div>
       </div>
 
       <div className={panelClass}>
-        <div className="flex items-center justify-between mb-4"><div><h3 className="text-base font-bold text-slate-900 flex items-center gap-2"><Activity size={18} className="text-teal-700"/> Останні операції</h3><p className="text-xs text-slate-500 mt-1">Відкрийте запис, щоб переглянути списані матеріали</p></div><button onClick={() => goTo('postop')} className="text-xs font-bold text-teal-700 hover:text-teal-700">Перейти до списання →</button></div>
+        <div className="flex items-center justify-between mb-4"><div><h3 className="text-base font-bold text-white flex items-center gap-2"><Activity size={18} className="text-teal-400"/> Останні операції</h3><p className="text-xs text-slate-400 mt-1">Відкрийте запис, щоб переглянути списані матеріали</p></div><button onClick={() => goTo('postop')} className="text-xs font-bold text-teal-400 hover:text-teal-300">Перейти до списання →</button></div>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left min-w-[580px]"><thead className="text-[10px] uppercase tracking-widest text-slate-500 bg-slate-50"><tr><th className="px-3 py-3">Дата</th><th className="px-3 py-3">№ операції</th><th className="px-3 py-3">ІБ пацієнта</th><th className="px-3 py-3">Тип втручання</th></tr></thead><tbody className="divide-y divide-slate-200 text-slate-700">
-            {recentOperations.map(op => <tr key={op.id} onClick={() => setSelectedOp(op)} className="cursor-pointer hover:bg-slate-100"><td className="px-3 py-3 whitespace-nowrap">{displayDate(op.operation_date)}</td><td className="px-3 py-3 font-mono font-bold text-teal-700">{op.operation_num || '—'}</td><td className="px-3 py-3">{op.patient_case_id || '—'}</td><td className="px-3 py-3">{op.operation_type || '—'}</td></tr>)}
-            {!recentOperations.length && <tr><td colSpan="4" className="px-4 py-10 text-center text-slate-500">Історія операцій порожня.</td></tr>}
+          <table className="w-full text-sm text-left min-w-[580px]"><thead className="text-[10px] uppercase tracking-widest text-slate-400 bg-slate-950"><tr><th className="px-3 py-3">Дата</th><th className="px-3 py-3">№ операції</th><th className="px-3 py-3">ІБ пацієнта</th><th className="px-3 py-3">Тип втручання</th></tr></thead><tbody className="divide-y divide-slate-800 text-slate-300">
+            {recentOperations.map(op => <tr key={op.id} onClick={() => setSelectedOp(op)} className="cursor-pointer hover:bg-slate-800/50"><td className="px-3 py-3 whitespace-nowrap">{displayDate(op.operation_date)}</td><td className="px-3 py-3 font-mono font-bold text-teal-400">{op.operation_num || '—'}</td><td className="px-3 py-3">{op.patient_case_id || '—'}</td><td className="px-3 py-3">{op.operation_type || '—'}</td></tr>)}
+            {!recentOperations.length && <tr><td colSpan="4" className="px-4 py-10 text-center text-slate-400">Історія операцій порожня.</td></tr>}
           </tbody></table>
         </div>
       </div>
 
-      {selectedOp && <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex justify-center items-center p-4" onClick={() => !isDeleting && setSelectedOp(null)}>
-        <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden" onClick={event => event.stopPropagation()}>
-          <div className="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50"><h3 className="text-lg font-bold text-slate-900 flex items-center gap-2"><Activity className="text-teal-500"/> Операція {selectedOp.operation_num || ''}</h3><button onClick={() => setSelectedOp(null)} className="text-slate-500 hover:text-slate-900 bg-slate-100 p-2 rounded-full" aria-label="Закрити"><X size={18}/></button></div>
-          <div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4 text-sm"><div><p className="text-slate-500 text-xs uppercase mb-1">Дата</p><p className="font-bold text-slate-900">{displayDate(selectedOp.operation_date)}</p></div><div><p className="text-slate-500 text-xs uppercase mb-1">ІБ пацієнта</p><p className="font-bold text-slate-900">{selectedOp.patient_case_id || '—'}</p></div><div className="col-span-2"><p className="text-slate-500 text-xs uppercase mb-1">Тип втручання</p><p className="font-bold text-slate-900">{selectedOp.operation_type || '—'}</p></div></div>
-            <div className="pt-4 border-t border-slate-200"><p className="text-slate-500 text-xs uppercase mb-3 font-bold">Списані матеріали</p><div className="space-y-2 max-h-48 overflow-y-auto">
-              {state.expenses.filter(expense => expense.operation_id === selectedOp.id).map(expense => { const batch = state.stock.find(item => item.id === expense.stock_batch_id) || state.writeoffs.find(item => item.id === expense.stock_batch_id); const material = state.materials.find(item => item.id === batch?.material_id); return <div key={expense.id} className="flex justify-between gap-3 items-center bg-slate-50 p-3 rounded-xl border border-slate-200"><div><p className="text-sm font-bold text-slate-900">{material?.name || 'Невідомий матеріал'}</p><p className="text-[10px] text-slate-500 mt-1">LOT: {batch?.lot_number || '—'} {batch?.size ? `· Розмір: ${batch.size}` : ''}</p></div><span className="font-black text-teal-700 whitespace-nowrap">{qty(expense.quantity)} од.</span></div>; })}
-              {!state.expenses.some(expense => expense.operation_id === selectedOp.id) && <p className="text-sm text-slate-500">Для цієї операції немає записів списання.</p>}
+      {selectedOp && <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex justify-center items-center p-4" onClick={() => !isDeleting && setSelectedOp(null)}>
+        <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden" onClick={event => event.stopPropagation()}>
+          <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-950"><h3 className="text-lg font-bold text-white flex items-center gap-2"><Activity className="text-teal-500"/> Операція {selectedOp.operation_num || ''}</h3><button onClick={() => setSelectedOp(null)} className="text-slate-400 hover:text-white bg-slate-800 p-2 rounded-full" aria-label="Закрити"><X size={18}/></button></div>
+          <div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4 text-sm"><div><p className="text-slate-400 text-xs uppercase mb-1">Дата</p><p className="font-bold text-white">{displayDate(selectedOp.operation_date)}</p></div><div><p className="text-slate-400 text-xs uppercase mb-1">ІБ пацієнта</p><p className="font-bold text-white">{selectedOp.patient_case_id || '—'}</p></div><div className="col-span-2"><p className="text-slate-400 text-xs uppercase mb-1">Тип втручання</p><p className="font-bold text-white">{selectedOp.operation_type || '—'}</p></div></div>
+            <div className="pt-4 border-t border-slate-800"><p className="text-slate-400 text-xs uppercase mb-3 font-bold">Списані матеріали</p><div className="space-y-2 max-h-48 overflow-y-auto">
+              {state.expenses.filter(expense => expense.operation_id === selectedOp.id).map(expense => { const batch = state.stock.find(item => item.id === expense.stock_batch_id) || state.writeoffs.find(item => item.id === expense.stock_batch_id); const material = state.materials.find(item => item.id === batch?.material_id); return <div key={expense.id} className="flex justify-between gap-3 items-center bg-slate-950 p-3 rounded-xl border border-slate-800"><div><p className="text-sm font-bold text-white">{material?.name || 'Невідомий матеріал'}</p><p className="text-[10px] text-slate-400 mt-1">LOT: {batch?.lot_number || '—'} {batch?.size ? `· Розмір: ${batch.size}` : ''}</p></div><span className="font-black text-teal-400 whitespace-nowrap">{qty(expense.quantity)} од.</span></div>; })}
+              {!state.expenses.some(expense => expense.operation_id === selectedOp.id) && <p className="text-sm text-slate-400">Для цієї операції немає записів списання.</p>}
             </div></div>
           </div>
-          <div className="p-5 border-t border-slate-200 bg-slate-50"><button onClick={handleDeleteOp} disabled={isDeleting} className="w-full bg-rose-50 text-rose-700 hover:bg-rose-100 hover:text-rose-800 py-3 rounded-xl font-bold flex justify-center items-center gap-2 border border-rose-200 disabled:opacity-50"><Trash2 size={18}/>{isDeleting ? 'Видалення…' : 'Скасувати та видалити операцію'}</button></div>
+          <div className="p-5 border-t border-slate-800 bg-slate-950"><button onClick={handleDeleteOp} disabled={isDeleting} className="w-full bg-rose-950 text-rose-400 hover:bg-rose-900 hover:text-white py-3 rounded-xl font-bold flex justify-center items-center gap-2 border border-rose-900/50 disabled:opacity-50"><Trash2 size={18}/>{isDeleting ? 'Видалення…' : 'Скасувати та видалити операцію'}</button></div>
         </div>
       </div>}
       {confirmDialog}
