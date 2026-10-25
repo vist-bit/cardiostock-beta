@@ -2,11 +2,11 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   HeartPulse, PackagePlus, Activity, AlertTriangle, Database, Download, CheckCircle,
   X, Search, Trash2, Camera, Calendar, Filter, ArrowDownUp, Lock, Unlock, Edit2, Clock,
-  PieChart as PieChartIcon, BarChart3, Users, Shield, ClipboardList, RefreshCw, Upload, FileText
+  PieChart as PieChartIcon, BarChart3, Users, Shield, ClipboardList, RefreshCw, Upload, FileText, Sparkles
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { fetchAllData, callAction as rawCallAction } from './appsScriptClient';
-import { parseDocumentFile, matchItem, matchItems, normalizeCode, suggestCode, availableBatches, isAutoAllocatable, planWriteoffRows } from './documentImport';
+import { parseDocumentFile, parseImageWithAi, detectKind, matchItem, matchItems, normalizeCode, suggestCode, availableBatches, isAutoAllocatable, planWriteoffRows } from './documentImport';
 
 // Сервер відповідає цим текстом (Code.gs, authorize_), коли PIN поточної сесії більше не існує:
 // адмін змінив PIN або видалив обліковий запис. Тоді сесію треба завершити, а не лишати
@@ -891,11 +891,17 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose, mode = 'sto
   const [addedCount, setAddedCount] = useState(0);
   const [previewUrl, setPreviewUrl] = useState('');
   const [showOriginal, setShowOriginal] = useState(false);
+  const [aiText, setAiText] = useState('');           // текст, який розпізнав AI (для звірки)
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
+  const lastFileRef = useRef(null);                   // останній обраний файл — для кнопки «Зчитати з AI»
+  const runRef = useRef(0);                           // номер поточного запуску: «Скасувати» робить його результат застарілим
+  const phaseBeforeRef = useRef('pick');              // куди повернутись після «Скасувати»
+  const aiConsentRef = useRef(false);                 // підтвердження «фото піде в Google» — один раз за відкриття вікна
   const previewRef = useRef('');
 
   useEffect(() => () => { if (previewRef.current) URL.revokeObjectURL(previewRef.current); }, []);
+  useEffect(() => () => { runRef.current++; }, []);
 
   const setPreview = (url) => {
     if (previewRef.current) URL.revokeObjectURL(previewRef.current);
@@ -905,25 +911,82 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose, mode = 'sto
   const reset = () => {
     setPhase('pick'); setRows([]); setWarnings([]); setError(''); setSaveError(''); setShowErrors(false);
     setFileName(''); setSource(''); setAddedCount(0); setFilter('all'); setShowOriginal(false); setPreview('');
+    setAiText(''); lastFileRef.current = null; runRef.current++;
+  };
+
+  // Спільне для обох способів читання: показати розібрану таблицю на перевірку.
+  const showParsed = (parsed, file) => {
+    const matches = matchItems(parsed.items, state.materials);
+    setRows(matches.map(({ item, match }, i) => buildImportRow(item, match, i, mode)));
+    setWarnings(parsed.warnings || []); setSource(parsed.source || ''); setAddedCount(0); setFilter('all'); setShowErrors(false);
+    setAiText(parsed.text || '');
+    setPreview((file.type || '').startsWith('image/') ? URL.createObjectURL(file) : '');
+    setPhase('review');
   };
 
   const handleFile = async (file) => {
     if (!file) return;
+    lastFileRef.current = file;
+    phaseBeforeRef.current = 'pick';
+    const run = ++runRef.current;
     setError(''); setSaveError(''); setPhase('parsing'); setFileName(file.name || 'документ');
     setProgress({ label: 'Починаю…', pct: null });
     try {
-      const parsed = await parseDocumentFile(file, { onProgress: setProgress });
-      const matches = matchItems(parsed.items, state.materials);
-      setRows(matches.map(({ item, match }, i) => buildImportRow(item, match, i, mode)));
-      setWarnings(parsed.warnings || []); setSource(parsed.source || ''); setAddedCount(0); setFilter('all'); setShowErrors(false);
-      setPreview((file.type || '').startsWith('image/') ? URL.createObjectURL(file) : '');
-      setPhase('review');
+      const parsed = await parseDocumentFile(file, { onProgress: (p) => { if (run === runRef.current) setProgress(p); } });
+      if (run !== runRef.current) return; // користувач натиснув «Скасувати»
+      showParsed(parsed, file);
     } catch (e) {
+      if (run !== runRef.current) return;
       console.error('Помилка розбору документа:', e);
       setError(e.message || 'Не вдалося розібрати документ.');
       setPhase('pick');
     }
   };
+
+  // «Зчитати з AI»: те саме фото розпізнає Google Cloud Vision (через сервер застосунку). Лише за кнопкою.
+  const handleAiRead = async () => {
+    const file = lastFileRef.current;
+    if (!file || phase === 'parsing' || addedCount > 0) return;
+    const replacing = phase === 'review';
+    if (!aiConsentRef.current || replacing) {
+      const parts = [];
+      if (!aiConsentRef.current) parts.push('Фото буде надіслано через сервер застосунку до сервісу Google Cloud Vision для розпізнавання тексту. Якщо на фото є дані пацієнтів, а правила відділення забороняють передавати їх у хмару, — не користуйтеся цією кнопкою.');
+      if (replacing) parts.push('Поточну таблицю й усі ваші правки буде замінено результатом AI.');
+      const ok = await askConfirm({ title: 'Зчитати фото за допомогою AI?', message: parts.join('\n\n'), confirmLabel: 'Зчитати з AI' });
+      if (!ok) return;
+      aiConsentRef.current = true;
+    }
+    phaseBeforeRef.current = replacing ? 'review' : 'pick';
+    const run = ++runRef.current;
+    setError(''); setSaveError(''); setPhase('parsing'); setFileName(file.name || 'фото');
+    setProgress({ label: 'Починаю…', pct: null });
+    try {
+      const parsed = await parseImageWithAi(file, {
+        callOcr: (payload) => callAction('ocrImage', payload, sessionPin),
+        onProgress: (p) => { if (run === runRef.current) setProgress(p); },
+        isCancelled: () => run !== runRef.current
+      });
+      if (run !== runRef.current) return;
+      showParsed(parsed, file);
+    } catch (e) {
+      if (run !== runRef.current) return;
+      console.error('Помилка AI-розпізнавання:', e);
+      const text = e.message || 'AI-розпізнавання не вдалося.';
+      if (replacing) {
+        // Попередній результат лишається як був — лише попереджаємо.
+        setWarnings(prev => [`AI не вдалося: ${text}`, ...prev]);
+        setPhase('review');
+      } else {
+        setError(text);
+        setPhase('pick');
+      }
+    }
+  };
+
+  const cancelParsing = () => { runRef.current++; setError(''); setPhase(phaseBeforeRef.current); };
+
+  // Кнопка «Зчитати з AI» доступна лише для фото й поки в довідник/склад нічого не додано з цього розбору.
+  const canAi = !!lastFileRef.current && detectKind(lastFileRef.current) === 'image' && addedCount === 0;
 
   const onFileChosen = (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleFile(f); };
 
@@ -1117,6 +1180,12 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose, mode = 'sto
                 <p className="text-sm text-slate-400">{cfg.intro}</p>
               </div>
               {error && <div role="alert" className="max-w-md w-full bg-rose-950/60 border border-rose-900 text-rose-200 text-sm rounded-xl p-4 text-left flex gap-3"><AlertTriangle size={18} className="shrink-0 mt-0.5" /> {error}</div>}
+              {error && canAi && (
+                <div className="max-w-md w-full space-y-2">
+                  <button onClick={handleAiRead} data-testid="import-ai" className="w-full bg-slate-800 hover:bg-slate-700 text-teal-400 font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 border border-slate-700"><Sparkles size={18} /> Зчитати з AI</button>
+                  <p className="text-xs text-slate-500">Для складних фото: розпізнає Google Cloud Vision. Фото буде надіслано в Google.</p>
+                </div>
+              )}
               {state.materials.length === 0 && mode !== 'catalog' && <div className="max-w-md w-full bg-amber-950/60 border border-amber-900 text-amber-200 text-sm rounded-xl p-4 text-left">Довідник порожній: спершу додайте матеріали у вкладці «Довідник».</div>}
               <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
                 <button onClick={() => fileInputRef.current && fileInputRef.current.click()} className="bg-teal-600 hover:bg-teal-500 text-white font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2"><Upload size={18} /> Обрати файл</button>
@@ -1124,7 +1193,7 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose, mode = 'sto
               </div>
               <input ref={fileInputRef} type="file" accept={IMPORT_ACCEPT} className="hidden" onChange={onFileChosen} data-testid="import-file" />
               <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onFileChosen} data-testid="import-camera" />
-              <p className="text-xs text-slate-500 max-w-md">Файл обробляється у вашому браузері й нікуди не надсилається. Фото розпізнаються гірше за PDF/Word — такі результати завжди звіряйте з оригіналом.</p>
+              <p className="text-xs text-slate-500 max-w-md">Файл обробляється у вашому браузері й нікуди не надсилається — окрім випадку, коли ви самі натиснете «Зчитати з AI» (тоді фото йде на розпізнавання в Google Cloud). Фото розпізнаються гірше за PDF/Word — такі результати завжди звіряйте з оригіналом.</p>
             </div>
           )}
 
@@ -1136,6 +1205,7 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose, mode = 'sto
                 <div className="w-full max-w-xs h-2 bg-slate-800 rounded-full overflow-hidden"><div className="h-full bg-teal-500 transition-all" style={{ width: `${progress.pct}%` }} /></div>
               )}
               <p className="text-xs text-slate-500">{fileName}</p>
+              <button onClick={cancelParsing} data-testid="import-cancel" className="text-sm font-bold text-slate-300 hover:text-white px-5 py-2.5 rounded-xl bg-slate-800">Скасувати</button>
             </div>
           )}
 
@@ -1146,11 +1216,23 @@ const DocumentImportModal = ({ state, dispatch, sessionPin, onClose, mode = 'sto
                   {warnings.map((w, i) => <div key={i} className="flex gap-2"><AlertTriangle size={16} className="shrink-0 mt-0.5" /> {w}</div>)}
                 </div>
               )}
+              {source === 'image-ocr' && canAi && (
+                <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
+                  <p className="text-sm text-slate-400">Результат неточний або бракує рядків? Спробуйте розпізнати це фото за допомогою AI (фото буде надіслано в Google Cloud Vision).</p>
+                  <button onClick={handleAiRead} data-testid="import-ai-review" className="shrink-0 bg-slate-800 hover:bg-slate-700 text-teal-400 font-bold text-sm px-4 py-2.5 rounded-xl flex items-center justify-center gap-2 border border-slate-700"><Sparkles size={16} /> Зчитати з AI</button>
+                </div>
+              )}
               {previewUrl && (
                 <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
                   <button onClick={() => setShowOriginal(v => !v)} className="text-sm font-bold text-teal-400 hover:text-teal-300">{showOriginal ? 'Сховати оригінал' : 'Показати оригінал для звірки'}</button>
                   {showOriginal && <a href={previewUrl} target="_blank" rel="noreferrer" className="block mt-3"><img src={previewUrl} alt="Оригінал документа" className="w-full max-h-96 object-contain rounded-lg bg-white" /></a>}
                 </div>
+              )}
+              {aiText && (
+                <details className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+                  <summary className="text-sm font-bold text-teal-400 cursor-pointer">Текст, який розпізнав AI</summary>
+                  <pre className="mt-3 text-xs text-slate-300 whitespace-pre-wrap max-h-64 overflow-y-auto">{aiText}</pre>
+                </details>
               )}
               {addedCount > 0 && <div className="rounded-xl border border-teal-900 bg-teal-950/40 text-teal-200 text-sm p-4 flex gap-2" role="status"><CheckCircle size={18} className="shrink-0" /> {addedLabel}: {addedCount} поз.</div>}
 
