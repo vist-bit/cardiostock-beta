@@ -174,7 +174,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
   const stockByMaterial = useMemo(() => {
     const map = new Map();
     state.materials.forEach(material => map.set(material.id, {
-      material, total: 0, usable: 0, expired: 0, expiring: 0, missingExpiry: 0, batches: 0
+      material, total: 0, usable: 0, expired: 0, expiring: 0, batches: 0
     }));
     state.stock.forEach(batch => {
       const row = map.get(batch.material_id);
@@ -184,7 +184,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
       if (amount <= 0) return;
       row.batches += 1;
       const days = daysFromToday(batch.expiration_date);
-      if (days === null) row.missingExpiry += amount;
+      if (days === null) row.usable += amount; // дата придатності не вказана — партія вважається нормальною
       else if (days < 0) row.expired += amount;
       else {
         row.usable += amount;
@@ -208,7 +208,6 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
     const days = daysFromToday(batch.expiration_date);
     return qty(batch.quantity) > 0 && days !== null && days >= 0 && days <= 30;
   });
-  const missingExpiryBatches = state.stock.filter(batch => qty(batch.quantity) > 0 && !dateKey(batch.expiration_date));
 
   const cutoff = new Date(dayStart);
   cutoff.setDate(cutoff.getDate() - (period - 1));
@@ -321,12 +320,8 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
       const material = state.materials.find(item => item.id === batch.material_id);
       list.push({ key: `expiring-${batch.id}`, type: 'expiring', title: material?.name || 'Невідомий матеріал', detail: `LOT ${batch.lot_number || '—'} · придатний до ${displayDate(batch.expiration_date)}`, quantity: qty(batch.quantity), priority: 3 });
     });
-    missingExpiryBatches.forEach(batch => {
-      const material = state.materials.find(item => item.id === batch.material_id);
-      list.push({ key: `missing-${batch.id}`, type: 'missing', title: material?.name || 'Невідомий матеріал', detail: `LOT ${batch.lot_number || '—'} · не вказано термін придатності`, quantity: qty(batch.quantity), priority: 4 });
-    });
     return list.sort((a, b) => a.priority - b.priority).slice(0, 12);
-  }, [state.stock, state.materials, expiredBatches, expiringBatches, missingExpiryBatches, lowStockItems, zeroStockItems, todayKey]);
+  }, [state.stock, state.materials, expiredBatches, expiringBatches, lowStockItems, zeroStockItems, todayKey]);
 
   const filteredMaterials = useMemo(() => {
     let rows = materialRows.filter(row => {
@@ -337,7 +332,6 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
       if (categoryFilter && (row.material.subcategory || 'Без категорії') !== categoryFilter) return false;
       if (alertFilter === 'expired' && row.expired <= 0) return false;
       if (alertFilter === 'expiring' && row.expiring <= 0) return false;
-      if (alertFilter === 'missing' && row.missingExpiry <= 0) return false;
       if (alertFilter === 'zero' && !(row.usable <= 0 && row.minimum > 0)) return false;
       if (alertFilter === 'low' && !(row.isLow && row.minimum > 0)) return false;
       return true;
@@ -388,7 +382,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
   const panelClass = 'bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl';
   const unitTotal = trendData.reduce((sum, row) => sum + row.units, 0);
   const operationTotal = trendData.reduce((sum, row) => sum + row.operations, 0);
-  const alertCount = expiredBatches.length + expiringBatches.length + missingExpiryBatches.length + zeroStockItems.length + lowStockItems.filter(row => row.usable > 0).length;
+  const alertCount = expiredBatches.length + expiringBatches.length + zeroStockItems.length + lowStockItems.filter(row => row.usable > 0).length;
 
   const fmtNum = (value, digits = 0) => (value === null || value === undefined ? '—' : Number(value).toLocaleString('uk-UA', { maximumFractionDigits: digits }));
   const fmtSigned = (value, digits = 0) => {
@@ -425,7 +419,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
         <button onClick={() => { setAlertFilter(''); setStockFilter('all'); goTo('inventory'); }} className={`${cardClass} text-left bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700 hover:border-teal-500`}>
           <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Доступний залишок</span><Database size={19} className="text-teal-400"/></div>
           <div className="text-3xl font-black text-white mt-3">{usableTotal.toLocaleString('uk-UA')} <span className="text-sm font-semibold text-slate-400">од.</span></div>
-          <p className="text-xs text-slate-400 mt-2">Без прострочених партій і партій без дати придатності</p>
+          <p className="text-xs text-slate-400 mt-2">Без прострочених партій; партії без вказаного терміну вважаються придатними</p>
         </button>
         <button onClick={() => { setAlertFilter('zero'); setStockFilter('all'); setCategoryFilter(''); setSearch(''); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${zeroStockItems.length ? 'bg-gradient-to-br from-rose-950 to-slate-900 border-rose-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'} hover:border-rose-500`}>
           <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Відсутні позиції</span><AlertTriangle size={19} className="text-rose-400"/></div>
@@ -572,7 +566,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
 
       <div id="dashboard-shortages" className={panelClass}>
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
-          <div><h3 className="text-base font-bold text-white flex items-center gap-2"><Database size={18} className="text-amber-400"/> Контроль залишків і дефіциту</h3><p className="text-xs text-slate-400 mt-1">Доступний залишок враховує лише партії з чинною датою придатності.</p></div>
+          <div><h3 className="text-base font-bold text-white flex items-center gap-2"><Database size={18} className="text-amber-400"/> Контроль залишків і дефіциту</h3><p className="text-xs text-slate-400 mt-1">Доступний залишок враховує партії з чинним терміном придатності та партії без вказаного терміну; прострочені не враховуються.</p></div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
             <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Пошук матеріалу або коду" className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 min-w-0"/>
             <select value={stockFilter} onChange={event => setStockFilter(event.target.value)} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300"><option value="all">Усі позиції</option><option value="deficit">Нижче мінімуму</option><option value="zero">Відсутні позиції</option></select>
@@ -582,7 +576,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
         </div>
         {(categoryFilter || alertFilter) && <div className="flex flex-wrap gap-2 mb-3">
           {categoryFilter && <span className="text-xs rounded-full bg-teal-900/30 text-teal-400 px-3 py-1">Категорія: {categoryFilter}</span>}
-          {alertFilter && <span className="text-xs rounded-full bg-amber-950/50 text-amber-400 px-3 py-1">Ризик: {({ expired: 'прострочені партії', expiring: 'закінчується термін', missing: 'без терміну придатності', zero: 'відсутні позиції', low: 'дефіцит' })[alertFilter] || alertFilter}</span>}
+          {alertFilter && <span className="text-xs rounded-full bg-amber-950/50 text-amber-400 px-3 py-1">Ризик: {({ expired: 'прострочені партії', expiring: 'закінчується термін', zero: 'відсутні позиції', low: 'дефіцит' })[alertFilter] || alertFilter}</span>}
         </div>}
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left min-w-[700px]">
@@ -594,7 +588,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
                 <td className="px-3 py-3 text-right font-bold text-white">{row.usable.toLocaleString('uk-UA')}</td>
                 <td className="px-3 py-3 text-right text-slate-400">{row.minimum.toLocaleString('uk-UA')}</td>
                 <td className={`px-3 py-3 text-right font-black ${row.deficit > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>{row.deficit.toLocaleString('uk-UA')}</td>
-                <td className="px-3 py-3">{row.isAbsent ? <div className="flex flex-wrap gap-1"><span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Відсутній</span>{row.expired > 0 && <span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Є прострочене</span>}</div> : row.expired > 0 ? <span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Є прострочене</span> : row.missingExpiry > 0 ? <span className="text-[10px] rounded-full bg-sky-950/50 text-sky-400 px-2 py-1">Немає терміну</span> : row.isLow && row.minimum > 0 ? <span className="text-[10px] rounded-full bg-amber-950/50 text-amber-400 px-2 py-1">Дефіцит</span> : row.expiring > 0 ? <span className="text-[10px] rounded-full bg-orange-950/50 text-orange-400 px-2 py-1">Скоро спливає</span> : <span className="text-[10px] rounded-full bg-emerald-950/50 text-emerald-400 px-2 py-1">У нормі</span>}</td>
+                <td className="px-3 py-3">{row.isAbsent ? <div className="flex flex-wrap gap-1"><span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Відсутній</span>{row.expired > 0 && <span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Є прострочене</span>}</div> : row.expired > 0 ? <span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Є прострочене</span> : row.isLow && row.minimum > 0 ? <span className="text-[10px] rounded-full bg-amber-950/50 text-amber-400 px-2 py-1">Дефіцит</span> : row.expiring > 0 ? <span className="text-[10px] rounded-full bg-orange-950/50 text-orange-400 px-2 py-1">Скоро спливає</span> : <span className="text-[10px] rounded-full bg-emerald-950/50 text-emerald-400 px-2 py-1">У нормі</span>}</td>
               </tr>)}
               {!visibleMaterials.length && <tr><td colSpan="6" className="px-4 py-10 text-center text-slate-400">За цими фільтрами позицій не знайдено.</td></tr>}
             </tbody>
