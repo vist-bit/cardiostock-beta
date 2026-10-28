@@ -126,11 +126,245 @@ const useConfirm = () => {
   return [askConfirm, confirmDialog];
 };
 
+// ---------- Експорт в Excel (.xlsx) ----------
+// Спільне оформлення всіх звітів: темно-синя шапка з білим жирним текстом, тонкі межі, чергування білих і світло-сірих
+// рядків, фіксована ширина колонок, перенос довгих значень. ExcelJS підвантажується лише при експорті.
+const REPORT_HEADER_ROW = 4;
+
+// Календарна дата { y, m, d } з 'YYYY-MM-DD', 'дд.мм.рррр' або ISO-мітки часу (тоді — за локальним часом, як і в решті додатку).
+const parseLocalDate = (value) => {
+  const raw = str(value).trim();
+  if (!raw) return null;
+  const plain = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (plain) return { y: +plain[1], m: +plain[2], d: +plain[3] };
+  const dotted = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (dotted) return { y: +dotted[3], m: +dotted[2], d: +dotted[1] };
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return { y: parsed.getFullYear(), m: parsed.getMonth() + 1, d: parsed.getDate() };
+};
+
+// Висоту рядків задаємо явно (не всі переглядачі підганяють її самі), тому оцінюємо кількість рядків тексту із запасом.
+const estimateWrappedLines = (text, width) => {
+  const limit = Math.max(1, Math.floor(width * 0.95));
+  let count = 1;
+  let used = 0;
+  str(text).split(/\r?\n/).forEach((paragraph, index) => {
+    if (index > 0) { count += 1; used = 0; }
+    paragraph.split(/\s+/).filter(Boolean).forEach(word => {
+      let len = word.length;
+      if (used > 0 && used + 1 + len <= limit) { used += 1 + len; return; }
+      if (used > 0) { count += 1; used = 0; }
+      while (len > limit) { count += 1; len -= limit; }
+      used = len;
+    });
+  });
+  return count;
+};
+
+const reportStamp = () => {
+  const pad = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  return `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+};
+
+// columns: [{ key, header, width, align, type: 'text' | 'date' | 'number' }]; rows — масив об'єктів за ключами колонок.
+// Текстові поля (ID, коди, № операції) пишемо рядками з форматом «@», щоб Excel не перетворював їх на числа/дати.
+// Для type 'date' значення — { y, m, d } (стане справжньою датою дд.мм.рррр), рядок (нерозпізнана дата) або null (порожньо).
+const buildReportWorkbook = async ({ sheetName, title, subtitle, columns, rows, orientation = 'landscape' }) => {
+  const mod = await import('exceljs'); // підвантажується лише при експорті
+  const ExcelJS = mod.default || mod;
+  const workbook = new ExcelJS.Workbook();
+  const lastColumn = columns.length;
+  const sheet = workbook.addWorksheet(sheetName, {
+    views: [{ state: 'frozen', ySplit: REPORT_HEADER_ROW, showGridLines: false }],
+    pageSetup: {
+      paperSize: 9, orientation, fitToPage: true, fitToWidth: 1, fitToHeight: 0,
+      printTitlesRow: `${REPORT_HEADER_ROW}:${REPORT_HEADER_ROW}`,
+      margins: { left: 0.5, right: 0.5, top: 0.6, bottom: 0.6, header: 0.3, footer: 0.3 }
+    }
+  });
+  sheet.headerFooter.oddFooter = '&RСторінка &P з &N';
+  columns.forEach((column, index) => { sheet.getColumn(index + 1).width = column.width; });
+
+  const FONT = 'Arial';
+  const thin = { style: 'thin', color: { argb: 'FFBFC5CD' } };
+  const border = { top: thin, left: thin, bottom: thin, right: thin };
+  const solid = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+
+  // Заголовок звіту
+  sheet.mergeCells(1, 1, 1, lastColumn);
+  sheet.mergeCells(2, 1, 2, lastColumn);
+  const titleCell = sheet.getCell(1, 1);
+  titleCell.value = title;
+  titleCell.font = { name: FONT, size: 14, bold: true, color: { argb: 'FF1F4E79' } };
+  titleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+  const subtitleCell = sheet.getCell(2, 1);
+  subtitleCell.value = subtitle;
+  subtitleCell.font = { name: FONT, size: 10, color: { argb: 'FF595959' } };
+  subtitleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+  sheet.getRow(1).height = 26;
+  sheet.getRow(2).height = 18;
+  sheet.getRow(3).height = 8;
+
+  // Шапка таблиці
+  const headerRow = sheet.getRow(REPORT_HEADER_ROW);
+  headerRow.height = 28;
+  columns.forEach((column, index) => {
+    const cell = headerRow.getCell(index + 1);
+    cell.value = column.header;
+    cell.font = { name: FONT, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.fill = solid('FF1F4E79');
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    cell.border = border;
+  });
+
+  // Дані
+  rows.forEach((item, index) => {
+    const row = sheet.getRow(REPORT_HEADER_ROW + 1 + index);
+    const fill = solid(index % 2 === 0 ? 'FFFFFFFF' : 'FFF2F4F7');
+    columns.forEach((column, columnIndex) => {
+      const cell = row.getCell(columnIndex + 1);
+      const value = item[column.key];
+      if (column.type === 'date') {
+        if (value && typeof value === 'object') { cell.value = new Date(Date.UTC(value.y, value.m - 1, value.d)); cell.numFmt = 'dd.mm.yyyy'; }
+        else { cell.value = value ? String(value) : null; cell.numFmt = '@'; }
+      } else if (column.type === 'number') {
+        if (Number.isFinite(value)) { cell.value = value; cell.numFmt = Number.isInteger(value) ? '0' : '0.00'; }
+      } else {
+        cell.value = str(value);
+        cell.numFmt = '@';
+      }
+      cell.font = { name: FONT, size: 10 };
+      cell.fill = fill;
+      cell.border = border;
+      cell.alignment = { vertical: 'middle', horizontal: column.align, wrapText: true };
+    });
+    const lines = Math.max(1, ...columns.filter(column => column.type === 'text').map(column => estimateWrappedLines(item[column.key], column.width)));
+    row.height = Math.max(20, lines * 13 + 7);
+  });
+
+  sheet.autoFilter = {
+    from: { row: REPORT_HEADER_ROW, column: 1 },
+    to: { row: REPORT_HEADER_ROW + rows.length, column: lastColumn }
+  };
+  return workbook.xlsx.writeBuffer();
+};
+
+const downloadExcelFile = (buffer, baseName) => {
+  const now = new Date();
+  const fileDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${baseName}_${fileDate}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+const EXPENSES_COLUMNS = [
+  { key: 'date', header: 'Дата', width: 13, align: 'center', type: 'date' },
+  { key: 'opNum', header: '№ операції', width: 13, align: 'center', type: 'text' },
+  { key: 'patient', header: 'ID пацієнта', width: 18, align: 'left', type: 'text' },
+  { key: 'opType', header: 'Назва операції', width: 38, align: 'left', type: 'text' },
+  { key: 'material', header: 'Матеріал', width: 58, align: 'left', type: 'text' },
+  { key: 'code', header: 'Артикул', width: 20, align: 'left', type: 'text' },
+  { key: 'qty', header: 'Кількість', width: 12, align: 'right', type: 'number' }
+];
+
+// Витрати: по рядку на кожен матеріал, використаний в операції; операції — за датою.
+const buildExpensesWorkbook = async (state) => {
+  const stockById = new Map(state.stock.map(batch => [batch.id, batch]));
+  const writeoffById = new Map(state.writeoffs.map(batch => [batch.id, batch]));
+  const materialById = new Map(state.materials.map(material => [material.id, material]));
+  const expensesByOperation = new Map();
+  state.expenses.forEach(expense => {
+    if (!expensesByOperation.has(expense.operation_id)) expensesByOperation.set(expense.operation_id, []);
+    expensesByOperation.get(expense.operation_id).push(expense);
+  });
+
+  const dateSortKey = (op) => { const p = parseLocalDate(op.operation_date); return p ? p.y * 10000 + p.m * 100 + p.d : Infinity; };
+  const operations = [...state.operations].sort((a, b) =>
+    (dateSortKey(a) - dateSortKey(b)) || str(a.operation_num).localeCompare(str(b.operation_num), 'uk', { numeric: true }));
+
+  const rows = [];
+  let operationsWithMaterials = 0;
+  operations.forEach(op => {
+    const opExpenses = expensesByOperation.get(op.id) || [];
+    if (opExpenses.length) operationsWithMaterials += 1;
+    opExpenses.forEach(expense => {
+      const batch = stockById.get(expense.stock_batch_id) || writeoffById.get(expense.stock_batch_id) || {};
+      const material = materialById.get(batch.material_id) || {};
+      rows.push({
+        date: parseLocalDate(op.operation_date) || str(op.operation_date),
+        opNum: str(op.operation_num),
+        patient: str(op.patient_case_id),
+        opType: str(op.operation_type),
+        material: str(material.name) || 'Невідомо',
+        code: str(material.code),
+        qty: Number(expense.quantity)
+      });
+    });
+  });
+  if (!rows.length) return { buffer: null, rowCount: 0 };
+
+  const buffer = await buildReportWorkbook({
+    sheetName: 'Витрати матеріалів',
+    title: 'Звіт про використані матеріали',
+    subtitle: `Сформовано: ${reportStamp()}  ·  Операцій: ${operationsWithMaterials}  ·  Записів: ${rows.length}`,
+    columns: EXPENSES_COLUMNS,
+    rows
+  });
+  return { buffer, rowCount: rows.length };
+};
+
+const STOCK_COLUMNS = [
+  { key: 'material', header: 'Матеріал', width: 62, align: 'left', type: 'text' },
+  { key: 'code', header: 'Артикул', width: 22, align: 'left', type: 'text' },
+  { key: 'expiry', header: 'Термін придатності', width: 20, align: 'center', type: 'date' },
+  { key: 'qty', header: 'Залишок', width: 12, align: 'right', type: 'number' }
+];
+
+// Склад: усі партії з ненульовим залишком (по рядку на партію, бо термін у партій різний); без прив'язки до фільтрів на екрані.
+const buildStockWorkbook = async (state) => {
+  const materialById = new Map(state.materials.map(material => [material.id, material]));
+  const batches = state.stock
+    .filter(batch => Number(batch.quantity) > 0)
+    .map(batch => {
+      const material = materialById.get(batch.material_id) || {};
+      const expiryRaw = str(batch.expiration_date).trim();
+      return {
+        materialId: batch.material_id,
+        material: str(material.name) || 'Невідомо',
+        code: str(material.code),
+        expiry: expiryRaw ? (parseLocalDate(expiryRaw) || expiryRaw) : null, // без терміну — порожня клітинка
+        expiryRaw,
+        qty: Number(batch.quantity)
+      };
+    })
+    .sort((a, b) => a.material.localeCompare(b.material, 'uk') || compareExpiry(a.expiryRaw, b.expiryRaw, 1));
+  if (!batches.length) return { buffer: null, rowCount: 0 };
+
+  const buffer = await buildReportWorkbook({
+    sheetName: 'Залишки на складі',
+    title: 'Залишки матеріалів на складі',
+    subtitle: `Сформовано: ${reportStamp()}  ·  Матеріалів: ${new Set(batches.map(batch => batch.materialId)).size}  ·  Партій: ${batches.length}`,
+    columns: STOCK_COLUMNS,
+    rows: batches,
+    orientation: 'portrait'
+  });
+  return { buffer, rowCount: batches.length };
+};
+
 const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
   const [askConfirm, confirmDialog] = useConfirm();
   const [selectedOp, setSelectedOp] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [period, setPeriod] = useState(30);
+  const [isExporting, setIsExporting] = useState(false);
   const [trendMetric, setTrendMetric] = useState('units');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [search, setSearch] = useState('');
@@ -165,6 +399,20 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
     return Number.isFinite(n) ? n : 0;
   };
   const goTo = (tab) => { if (setActiveTab) setActiveTab(tab); };
+  const exportExpenses = async () => {
+    if (isExporting) return;
+    setIsExporting(true);
+    try {
+      const { buffer, rowCount } = await buildExpensesWorkbook(state);
+      if (!rowCount) { alert('Немає списань на операції для експорту.'); return; }
+      downloadExcelFile(buffer, 'cardio_expenses');
+    } catch (e) {
+      console.error(e);
+      alert('Не вдалося сформувати Excel-файл.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
   const daysFromToday = (value) => {
     const key = dateKey(value);
     if (!key) return null;
@@ -412,6 +660,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
         <div className="flex flex-wrap gap-2">
           <button onClick={() => goTo('stockin')} className="px-4 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-sm font-bold flex items-center gap-2"><PackagePlus size={16}/> Оприбуткувати</button>
           <button onClick={() => goTo('postop')} className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-sm font-bold flex items-center gap-2"><Activity size={16}/> Списати після операції</button>
+          <button onClick={exportExpenses} disabled={isExporting} className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-teal-400 text-sm font-bold flex items-center gap-2 disabled:opacity-50" title="Експорт витрат матеріалів в Excel (.xlsx)"><Download size={16}/> {isExporting ? 'Формування…' : 'Експорт витрат'}</button>
         </div>
       </div>
 
@@ -1953,174 +2202,6 @@ const Catalog = ({ state, dispatch, sessionPin }) => {
   );
 };
 
-// ---------- Експорт витрат в Excel (.xlsx) ----------
-// Колонки звіту: ширина фіксована й однакова для всіх рядків; «Матеріал» — найширша, з переносом довгих назв.
-const EXPORT_HEADER_ROW = 4;
-const EXPORT_SHEET_COLUMNS = [
-  { key: 'date', header: 'Дата', width: 13, align: 'center' },
-  { key: 'opNum', header: '№ операції', width: 13, align: 'center' },
-  { key: 'patient', header: 'ID пацієнта', width: 18, align: 'left' },
-  { key: 'opType', header: 'Назва операції', width: 38, align: 'left' },
-  { key: 'material', header: 'Матеріал', width: 58, align: 'left' },
-  { key: 'code', header: 'Артикул', width: 20, align: 'left' },
-  { key: 'qty', header: 'Кількість', width: 12, align: 'right' }
-];
-
-// Календарна дата { y, m, d } з 'YYYY-MM-DD', 'дд.мм.рррр' або ISO-мітки часу (тоді — за локальним часом, як і в решті додатку).
-const parseLocalDate = (value) => {
-  const raw = str(value).trim();
-  if (!raw) return null;
-  const plain = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (plain) return { y: +plain[1], m: +plain[2], d: +plain[3] };
-  const dotted = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-  if (dotted) return { y: +dotted[3], m: +dotted[2], d: +dotted[1] };
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return { y: parsed.getFullYear(), m: parsed.getMonth() + 1, d: parsed.getDate() };
-};
-
-// Excel сам не підганяє висоту рядків у всіх переглядачах, тому оцінюємо кількість рядків тексту із запасом.
-const estimateWrappedLines = (text, width) => {
-  const limit = Math.max(1, Math.floor(width * 0.95));
-  let count = 1;
-  let used = 0;
-  str(text).split(/\r?\n/).forEach((paragraph, index) => {
-    if (index > 0) { count += 1; used = 0; }
-    paragraph.split(/\s+/).filter(Boolean).forEach(word => {
-      let len = word.length;
-      if (used > 0 && used + 1 + len <= limit) { used += 1 + len; return; }
-      if (used > 0) { count += 1; used = 0; }
-      while (len > limit) { count += 1; len -= limit; }
-      used = len;
-    });
-  });
-  return count;
-};
-
-const buildExpensesWorkbook = async (state) => {
-  const stockById = new Map(state.stock.map(batch => [batch.id, batch]));
-  const writeoffById = new Map(state.writeoffs.map(batch => [batch.id, batch]));
-  const materialById = new Map(state.materials.map(material => [material.id, material]));
-  const expensesByOperation = new Map();
-  state.expenses.forEach(expense => {
-    if (!expensesByOperation.has(expense.operation_id)) expensesByOperation.set(expense.operation_id, []);
-    expensesByOperation.get(expense.operation_id).push(expense);
-  });
-
-  const dateSortKey = (op) => { const p = parseLocalDate(op.operation_date); return p ? p.y * 10000 + p.m * 100 + p.d : Infinity; };
-  const operations = [...state.operations].sort((a, b) =>
-    (dateSortKey(a) - dateSortKey(b)) || str(a.operation_num).localeCompare(str(b.operation_num), 'uk', { numeric: true }));
-
-  const rows = [];
-  let operationsWithMaterials = 0;
-  operations.forEach(op => {
-    const opExpenses = expensesByOperation.get(op.id) || [];
-    if (opExpenses.length) operationsWithMaterials += 1;
-    opExpenses.forEach(expense => {
-      const batch = stockById.get(expense.stock_batch_id) || writeoffById.get(expense.stock_batch_id) || {};
-      const material = materialById.get(batch.material_id) || {};
-      rows.push({
-        date: parseLocalDate(op.operation_date),
-        dateRaw: str(op.operation_date),
-        opNum: str(op.operation_num),
-        patient: str(op.patient_case_id),
-        opType: str(op.operation_type),
-        material: str(material.name) || 'Невідомо',
-        code: str(material.code),
-        qty: Number(expense.quantity)
-      });
-    });
-  });
-  if (!rows.length) return { buffer: null, rowCount: 0, operationCount: 0 };
-
-  const mod = await import('exceljs'); // підвантажується лише при експорті
-  const ExcelJS = mod.default || mod;
-  const workbook = new ExcelJS.Workbook();
-  const lastColumn = EXPORT_SHEET_COLUMNS.length;
-  const sheet = workbook.addWorksheet('Витрати матеріалів', {
-    views: [{ state: 'frozen', ySplit: EXPORT_HEADER_ROW, showGridLines: false }],
-    pageSetup: {
-      paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0,
-      printTitlesRow: `${EXPORT_HEADER_ROW}:${EXPORT_HEADER_ROW}`,
-      margins: { left: 0.5, right: 0.5, top: 0.6, bottom: 0.6, header: 0.3, footer: 0.3 }
-    }
-  });
-  sheet.headerFooter.oddFooter = '&RСторінка &P з &N';
-  EXPORT_SHEET_COLUMNS.forEach((column, index) => { sheet.getColumn(index + 1).width = column.width; });
-
-  const FONT = 'Arial';
-  const thin = { style: 'thin', color: { argb: 'FFBFC5CD' } };
-  const border = { top: thin, left: thin, bottom: thin, right: thin };
-  const solid = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
-
-  // Заголовок звіту
-  const pad = (n) => String(n).padStart(2, '0');
-  const now = new Date();
-  const stamp = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
-  sheet.mergeCells(1, 1, 1, lastColumn);
-  sheet.mergeCells(2, 1, 2, lastColumn);
-  const title = sheet.getCell(1, 1);
-  title.value = 'Звіт про використані матеріали';
-  title.font = { name: FONT, size: 14, bold: true, color: { argb: 'FF1F4E79' } };
-  title.alignment = { vertical: 'middle', horizontal: 'left' };
-  const subtitle = sheet.getCell(2, 1);
-  subtitle.value = `Сформовано: ${stamp}  ·  Операцій: ${operationsWithMaterials}  ·  Записів: ${rows.length}`;
-  subtitle.font = { name: FONT, size: 10, color: { argb: 'FF595959' } };
-  subtitle.alignment = { vertical: 'middle', horizontal: 'left' };
-  sheet.getRow(1).height = 26;
-  sheet.getRow(2).height = 18;
-  sheet.getRow(3).height = 8;
-
-  // Шапка таблиці
-  const headerRow = sheet.getRow(EXPORT_HEADER_ROW);
-  headerRow.height = 28;
-  EXPORT_SHEET_COLUMNS.forEach((column, index) => {
-    const cell = headerRow.getCell(index + 1);
-    cell.value = column.header;
-    cell.font = { name: FONT, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-    cell.fill = solid('FF1F4E79');
-    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-    cell.border = border;
-  });
-
-  // Дані: текстові поля (ID, коди, № операції) пишемо рядками з форматом «@», щоб Excel не перетворював їх на числа/дати.
-  rows.forEach((item, index) => {
-    const row = sheet.getRow(EXPORT_HEADER_ROW + 1 + index);
-    const fill = solid(index % 2 === 0 ? 'FFFFFFFF' : 'FFF2F4F7');
-    EXPORT_SHEET_COLUMNS.forEach((column, columnIndex) => {
-      const cell = row.getCell(columnIndex + 1);
-      if (column.key === 'date') {
-        if (item.date) { cell.value = new Date(Date.UTC(item.date.y, item.date.m - 1, item.date.d)); cell.numFmt = 'dd.mm.yyyy'; }
-        else { cell.value = item.dateRaw; cell.numFmt = '@'; }
-      } else if (column.key === 'qty') {
-        if (Number.isFinite(item.qty)) { cell.value = item.qty; cell.numFmt = Number.isInteger(item.qty) ? '0' : '0.00'; }
-        else { cell.value = ''; }
-      } else {
-        cell.value = item[column.key];
-        cell.numFmt = '@';
-      }
-      cell.font = { name: FONT, size: 10 };
-      cell.fill = fill;
-      cell.border = border;
-      cell.alignment = { vertical: 'middle', horizontal: column.align, wrapText: true };
-    });
-    const lines = Math.max(
-      estimateWrappedLines(item.opType, EXPORT_SHEET_COLUMNS[3].width),
-      estimateWrappedLines(item.material, EXPORT_SHEET_COLUMNS[4].width),
-      estimateWrappedLines(item.patient, EXPORT_SHEET_COLUMNS[2].width),
-      estimateWrappedLines(item.code, EXPORT_SHEET_COLUMNS[5].width)
-    );
-    row.height = Math.max(20, lines * 13 + 7);
-  });
-
-  sheet.autoFilter = {
-    from: { row: EXPORT_HEADER_ROW, column: 1 },
-    to: { row: EXPORT_HEADER_ROW + rows.length, column: lastColumn }
-  };
-
-  return { buffer: await workbook.xlsx.writeBuffer(), rowCount: rows.length, operationCount: operationsWithMaterials };
-};
-
 const Inventory = ({ state, dispatch, isReadOnly, sessionPin }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('All');
@@ -2177,23 +2258,13 @@ const Inventory = ({ state, dispatch, isReadOnly, sessionPin }) => {
       return { arrived: arrived?.created_at, history: [...ops, ...woffs].sort((a,b) => new Date(b.date) - new Date(a.date)) };
   };
 
-  const exportExcel = async () => {
+  const exportStock = async () => {
     if (isExporting) return;
     setIsExporting(true);
     try {
-      const { buffer, rowCount } = await buildExpensesWorkbook(state);
-      if (!rowCount) { alert('Немає списань на операції для експорту.'); return; }
-      const now = new Date();
-      const fileDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `cardio_expenses_${fileDate}.xlsx`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const { buffer, rowCount } = await buildStockWorkbook(state);
+      if (!rowCount) { alert('На складі немає матеріалів для експорту.'); return; }
+      downloadExcelFile(buffer, 'cardio_stock');
     } catch (e) {
       console.error(e);
       alert('Не вдалося сформувати Excel-файл.');
@@ -2256,7 +2327,7 @@ const Inventory = ({ state, dispatch, isReadOnly, sessionPin }) => {
         <div className="flex gap-3 w-full md:w-auto">
             <div className="relative flex-1 md:w-48"><Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} /><select value={filterCategory} onChange={e => setFilterCategory(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded-2xl py-3.5 pl-10 pr-3 text-sm text-white outline-none appearance-none cursor-pointer"><option value="All">Всі категорії</option>{subcategories.filter(c => c !== 'All').map(c => <option key={c || '__none'} value={c}>{c || 'Без підкатегорії'}</option>)}</select></div>
             <div className="relative flex-1 md:w-48"><ArrowDownUp className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} /><select value={sortBy} onChange={e => setSortBy(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded-2xl py-3.5 pl-10 pr-3 text-sm text-white outline-none appearance-none cursor-pointer"><option value="exp_asc">Термін (старі)</option><option value="exp_desc">Термін (нові)</option><option value="name_asc">За алфавітом</option><option value="qty_desc">За кількістю</option></select></div>
-            <button onClick={exportExcel} disabled={isExporting} className="bg-slate-800 hover:bg-slate-700 text-teal-400 border border-slate-700 rounded-2xl px-4 flex items-center justify-center transition-colors disabled:opacity-50" title="Експорт витрат в Excel (.xlsx)" aria-label="Експорт витрат в Excel"><Download size={20}/></button>
+            <button onClick={exportStock} disabled={isExporting} className="bg-slate-800 hover:bg-slate-700 text-teal-400 border border-slate-700 rounded-2xl px-4 flex items-center justify-center transition-colors disabled:opacity-50" title="Експорт залишків складу в Excel (.xlsx)" aria-label="Експорт залишків складу в Excel"><Download size={20}/></button>
         </div>
       </div>
 
