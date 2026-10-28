@@ -18,7 +18,8 @@
     "recharts": "^3.10.1",
     "pdfjs-dist": "3.11.174",
     "mammoth": "1.8.0",
-    "tesseract.js": "5.1.1"
+    "tesseract.js": "5.1.1",
+    "exceljs": "^4.4.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
