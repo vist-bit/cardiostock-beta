@@ -196,7 +196,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
 
   const materialRows = useMemo(() => Array.from(stockByMaterial.values()).map(row => {
     const minimum = Math.max(0, qty(row.material.min_stock));
-    return { ...row, minimum, deficit: Math.max(0, minimum - row.usable), isLow: row.usable < minimum };
+    return { ...row, minimum, deficit: Math.max(0, minimum - row.usable), isLow: row.usable < minimum, isAbsent: minimum > 0 && row.usable <= 0 };
   }), [stockByMaterial]);
 
   const usableTotal = materialRows.reduce((sum, row) => sum + row.usable, 0);
@@ -259,6 +259,55 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
     return Array.from(categories, ([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value);
   }, [expenseRecords, period, todayKey]);
+
+  // Порівняння періодів: поточні N днів проти попередніх N днів, плюс ті самі два періоди торік (для оцінки сезонності).
+  // Одиниці рахуються за тими самими датами, що й графік динаміки; операції — за датою операції.
+  const comparison = useMemo(() => {
+    const pad = (n) => String(n).padStart(2, '0');
+    const keyOf = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    const shiftDays = (date, days) => { const next = new Date(date); next.setDate(next.getDate() + days); return next; };
+    const shiftYear = (date) => { const next = new Date(date); next.setFullYear(next.getFullYear() - 1); return next; };
+    const opKeys = state.operations.map(op => dateKey(op.operation_date)).filter(Boolean);
+    const earliest = [...opKeys, ...expenseRecords.map(expense => expense.date).filter(Boolean)]
+      .reduce((min, key) => (!min || key < min ? key : min), '');
+    const measure = (from, to) => {
+      const fromKey = keyOf(from);
+      const toKey = keyOf(to);
+      let units = 0;
+      let ops = 0;
+      expenseRecords.forEach(expense => { if (expense.date && expense.date >= fromKey && expense.date <= toKey) units += expense.amount; });
+      opKeys.forEach(key => { if (key >= fromKey && key <= toKey) ops += 1; });
+      return { fromKey, toKey, units, ops, perOp: ops > 0 ? units / ops : null };
+    };
+    const pct = (current, previous) => (previous !== null && previous > 0 ? ((current - previous) / previous) * 100 : null);
+
+    const curFrom = shiftDays(dayStart, -(period - 1));
+    const prevTo = shiftDays(dayStart, -period);
+    const prevFrom = shiftDays(dayStart, -(period * 2 - 1));
+    const cur = measure(curFrom, dayStart);
+    const prev = measure(prevFrom, prevTo);
+    const yCur = measure(shiftYear(curFrom), shiftYear(dayStart));
+    const yPrev = measure(shiftYear(prevFrom), shiftYear(prevTo));
+
+    const coverage = !earliest ? 'none' : earliest <= prev.fromKey ? 'full' : earliest <= prev.toKey ? 'partial' : 'none';
+    // Розклад зміни списань: volume + rate = cur.units - prev.units (точна тотожність).
+    const canDecompose = cur.ops > 0 && prev.ops > 0;
+    const volumeEffect = canDecompose ? (cur.ops - prev.ops) * prev.perOp : null;
+    const rateEffect = canDecompose ? cur.ops * (cur.perOp - prev.perOp) : null;
+    // Сезонність оцінюємо лише якщо в системі є записи за обидва ті самі періоди торік.
+    const seasonOk = !!earliest && earliest <= yPrev.fromKey && yPrev.ops > 0 && yCur.ops > 0;
+    const unitsPct = pct(cur.units, prev.units);
+    const seasonalPct = seasonOk ? pct(yCur.units, yPrev.units) : null;
+    return {
+      cur, prev, yCur, yPrev, earliest, coverage, canDecompose, volumeEffect, rateEffect, seasonOk,
+      unitsPct, seasonalPct,
+      seasonalOpsPct: seasonOk ? pct(yCur.ops, yPrev.ops) : null,
+      opsPct: pct(cur.ops, prev.ops),
+      perOpPct: canDecompose ? pct(cur.perOp, prev.perOp) : null,
+      excessPp: seasonOk && unitsPct !== null && seasonalPct !== null ? unitsPct - seasonalPct : null,
+      lowSample: cur.ops < 5 || prev.ops < 5
+    };
+  }, [period, todayKey, state.operations, expenseRecords]);
 
   const alerts = useMemo(() => {
     const list = [];
@@ -341,6 +390,23 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
   const operationTotal = trendData.reduce((sum, row) => sum + row.operations, 0);
   const alertCount = expiredBatches.length + expiringBatches.length + missingExpiryBatches.length + zeroStockItems.length + lowStockItems.filter(row => row.usable > 0).length;
 
+  const fmtNum = (value, digits = 0) => (value === null || value === undefined ? '—' : Number(value).toLocaleString('uk-UA', { maximumFractionDigits: digits }));
+  const fmtSigned = (value, digits = 0) => {
+    if (value === null || value === undefined) return '—';
+    const rounded = Number(value.toFixed(digits));
+    return `${rounded > 0 ? '+' : rounded < 0 ? '−' : ''}${fmtNum(Math.abs(rounded), digits)}`;
+  };
+  const fmtPct = (value) => (value === null || value === undefined ? '—' : `${Math.round(value) > 0 ? '+' : Math.round(value) < 0 ? '−' : ''}${Math.abs(Math.round(value))}%`);
+  const deltaTone = (value) => (value > 0 ? 'text-sky-400' : value < 0 ? 'text-teal-400' : 'text-slate-400');
+  const deltaArrow = (value) => (value > 0 ? '▲' : value < 0 ? '▼' : '•');
+  const periodLabel = (range) => `${displayDate(range.fromKey)} – ${displayDate(range.toKey)}`;
+  const comparisonRows = [
+    { label: 'Списано одиниць', prev: comparison.prev.units, cur: comparison.cur.units, pct: comparison.unitsPct, digits: 0 },
+    { label: 'Операцій', prev: comparison.prev.ops, cur: comparison.cur.ops, pct: comparison.opsPct, digits: 0 },
+    { label: 'Списано на одну операцію', prev: comparison.prev.perOp, cur: comparison.cur.perOp, pct: comparison.perOpPct, digits: 1 }
+  ];
+  const effectScale = comparison.canDecompose ? Math.max(Math.abs(comparison.volumeEffect), Math.abs(comparison.rateEffect), 1) : 1;
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -361,10 +427,10 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
           <div className="text-3xl font-black text-white mt-3">{usableTotal.toLocaleString('uk-UA')} <span className="text-sm font-semibold text-slate-400">од.</span></div>
           <p className="text-xs text-slate-400 mt-2">Без прострочених партій і партій без дати придатності</p>
         </button>
-        <button onClick={() => { setAlertFilter('expired'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiredBatches.length ? 'bg-gradient-to-br from-rose-950 to-slate-900 border-rose-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'} hover:border-rose-500`}>
-          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Прострочені партії</span><AlertTriangle size={19} className="text-rose-400"/></div>
-          <div className="text-3xl font-black text-rose-400 mt-3">{expiredBatches.length}</div>
-          <p className="text-xs text-slate-400 mt-2">Партії з позитивним залишком</p>
+        <button onClick={() => { setAlertFilter('zero'); setStockFilter('all'); setCategoryFilter(''); setSearch(''); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${zeroStockItems.length ? 'bg-gradient-to-br from-rose-950 to-slate-900 border-rose-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'} hover:border-rose-500`}>
+          <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Відсутні позиції</span><AlertTriangle size={19} className="text-rose-400"/></div>
+          <div className="text-3xl font-black text-rose-400 mt-3">{zeroStockItems.length}</div>
+          <p className="text-xs text-slate-400 mt-2">Немає придатного залишку · прострочені не враховуються</p>
         </button>
         <button onClick={() => { setAlertFilter('expiring'); document.getElementById('dashboard-shortages')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className={`${cardClass} text-left ${expiringBatches.length ? 'bg-gradient-to-br from-amber-950 to-slate-900 border-amber-900/50' : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-700'} hover:border-amber-500`}>
           <div className="flex items-center justify-between"><span className="text-xs uppercase tracking-widest font-bold text-slate-400">Придатність ≤ 30 днів</span><Calendar size={19} className="text-amber-400"/></div>
@@ -434,19 +500,89 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
         </div>
       </div>
 
+      <div id="dashboard-comparison" className={panelClass}>
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-base font-bold text-white flex items-center gap-2"><BarChart3 size={18} className="text-violet-400"/> Порівняння періодів</h3>
+            <p className="text-xs text-slate-400 mt-1">Останні {period} днів ({periodLabel(comparison.cur)}) проти попередніх {period} днів ({periodLabel(comparison.prev)})</p>
+          </div>
+          <select value={period} onChange={event => setPeriod(Number(event.target.value))} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-300"><option value={7}>7 днів</option><option value={30}>30 днів</option><option value={90}>90 днів</option></select>
+        </div>
+        {comparison.coverage === 'none' ? <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">Для порівняння потрібна історія хоча б за попередні {period} днів. {comparison.earliest ? `Записи в системі починаються з ${displayDate(comparison.earliest)}.` : 'Записів списання ще немає.'}</div> : <div className="space-y-4">
+          {comparison.coverage === 'partial' && <div className="rounded-xl border border-amber-900/50 bg-amber-950/40 p-3 text-xs text-amber-400">Записи в системі починаються з {displayDate(comparison.earliest)}, тому попередній період охоплено не повністю — зміна може бути завищеною.</div>}
+          {comparison.lowSample && <div className="rounded-xl border border-amber-900/50 bg-amber-950/40 p-3 text-xs text-amber-400">В одному з періодів менше 5 операцій — відсотки нестабільні, орієнтуйтеся на абсолютні числа.</div>}
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+            <p className="text-[10px] uppercase tracking-widest font-bold text-sky-400 mb-1">Фактична зміна</p>
+            <p className="text-xs text-slate-400 mb-3">Що змінилося між сусідніми періодами — без поправки на сезон.</p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left min-w-[480px]">
+                <thead className="text-[10px] uppercase tracking-widest text-slate-400"><tr><th className="py-2 pr-3">Показник</th><th className="py-2 px-3 text-right">Попередні {period} дн.</th><th className="py-2 px-3 text-right">Останні {period} дн.</th><th className="py-2 px-3 text-right">Зміна</th><th className="py-2 pl-3 text-right">%</th></tr></thead>
+                <tbody className="divide-y divide-slate-800">
+                  {comparisonRows.map(row => {
+                    const delta = row.prev !== null && row.cur !== null ? row.cur - row.prev : null;
+                    return <tr key={row.label}>
+                      <td className="py-3 pr-3 text-slate-200 font-semibold">{row.label}</td>
+                      <td className="py-3 px-3 text-right text-slate-400">{fmtNum(row.prev, row.digits)}</td>
+                      <td className="py-3 px-3 text-right font-bold text-white">{fmtNum(row.cur, row.digits)}</td>
+                      <td className={`py-3 px-3 text-right font-bold ${deltaTone(delta)}`}>{delta === null ? '—' : `${deltaArrow(Number(delta.toFixed(row.digits)))} ${fmtSigned(delta, row.digits)}`}</td>
+                      <td className={`py-3 pl-3 text-right font-bold ${deltaTone(row.pct)}`}>{fmtPct(row.pct)}</td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+              <p className="text-[10px] uppercase tracking-widest font-bold text-teal-400 mb-1">З чого складається зміна</p>
+              <p className="text-xs text-slate-400 mb-3">Окремо: вплив навантаження (скільки було операцій) і фактична зміна витрати на одну операцію.</p>
+              {comparison.canDecompose ? <div className="space-y-3">
+                {[
+                  { key: 'volume', label: 'Навантаження: кількість операцій', value: comparison.volumeEffect, hint: 'Більше операцій — більше списань, навіть якщо на кожну йде стільки ж матеріалів. Це не зміна використання.' },
+                  { key: 'rate', label: 'Фактична зміна: витрата на одну операцію', value: comparison.rateEffect, hint: 'Реальна зміна кількості матеріалів на кожну операцію; може відображати інший склад втручань або практику.' }
+                ].map(item => <div key={item.key}>
+                  <div className="flex justify-between gap-3 text-xs mb-1.5"><span className="text-slate-300">{item.label}</span><span className={`font-bold whitespace-nowrap ${deltaTone(item.value)}`}>{fmtSigned(item.value)} од.</span></div>
+                  <div className="h-2 rounded-full bg-slate-800 overflow-hidden"><div className={`h-full rounded-full ${item.value >= 0 ? 'bg-sky-400' : 'bg-teal-400'}`} style={{ width: `${Math.max(2, Math.abs(item.value) / effectScale * 100)}%` }}/></div>
+                  <p className="text-[11px] text-slate-500 mt-1">{item.hint}</p>
+                </div>)}
+                <div className="flex justify-between gap-3 border-t border-slate-800 pt-3 text-xs"><span className="text-slate-400">Разом (зміна списаних одиниць)</span><span className="font-bold text-white whitespace-nowrap">{fmtSigned(comparison.cur.units - comparison.prev.units)} од.</span></div>
+                <p className="text-xs text-slate-300">{Math.abs(comparison.volumeEffect) >= Math.abs(comparison.rateEffect) ? 'Більша частина зміни — це навантаження (кількість операцій), а не інше використання матеріалів.' : 'Більша частина зміни — це інша витрата матеріалів на одну операцію, а не лише кількість операцій.'}</p>
+              </div> : <p className="text-sm text-slate-400">Щоб розділити ці два впливи, потрібна хоча б одна операція в кожному з періодів.</p>}
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+              <p className="text-[10px] uppercase tracking-widest font-bold text-violet-400 mb-1">Сезонність</p>
+              <p className="text-xs text-slate-400 mb-3">Як змінювалися витрати торік між тими самими двома періодами — це типова сезонна динаміка.</p>
+              {comparison.seasonOk ? <div className="space-y-2 text-sm">
+                <div className="flex justify-between gap-3"><span className="text-slate-400">Торік ({periodLabel(comparison.yPrev)} → {periodLabel(comparison.yCur)})</span><span className="text-slate-200 font-bold whitespace-nowrap">{fmtNum(comparison.yPrev.units)} → {fmtNum(comparison.yCur.units)} од. ({fmtPct(comparison.seasonalPct)})</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-400">Цього року</span><span className="text-slate-200 font-bold whitespace-nowrap">{fmtNum(comparison.prev.units)} → {fmtNum(comparison.cur.units)} од. ({fmtPct(comparison.unitsPct)})</span></div>
+                <div className="flex justify-between gap-3 border-t border-slate-800 pt-2"><span className="text-slate-400">Відхилення від торішньої динаміки</span><span className="text-white font-bold whitespace-nowrap">{comparison.excessPp === null ? '—' : `${fmtSigned(comparison.excessPp)} п.п.`}</span></div>
+                {comparison.excessPp !== null && <p className="text-xs text-slate-300 pt-1">{Math.abs(comparison.excessPp) <= 10 ? 'Динаміка близька до торішньої (різниця до 10 п.п.): зміна, імовірно, здебільшого сезонна.' : 'Динаміка відрізняється від торішньої більш ніж на 10 п.п.: сезонність пояснює зміну лише частково, решта схожа на фактичну зміну.'}</p>}
+                <p className="text-[11px] text-slate-500">Один минулий рік — це орієнтир, а не доказ.</p>
+              </div> : <div className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-xs text-slate-400 space-y-1.5">
+                <p>{comparison.earliest && comparison.earliest <= comparison.yPrev.fromKey ? 'За ті самі періоди торік у системі недостатньо операцій для порівняння.' : `Записи в системі починаються з ${comparison.earliest ? displayDate(comparison.earliest) : '—'}, а для оцінки сезонності потрібні дані за ті самі періоди торік (${periodLabel(comparison.yPrev)} і ${periodLabel(comparison.yCur)}).`}</p>
+                <p className="text-slate-300">Поки що сезонні коливання не можна відокремити від фактичних змін, тому відсоток зміни ліворуч не варто сприймати як тренд.</p>
+              </div>}
+            </div>
+          </div>
+        </div>}
+      </div>
+
       <div id="dashboard-shortages" className={panelClass}>
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
           <div><h3 className="text-base font-bold text-white flex items-center gap-2"><Database size={18} className="text-amber-400"/> Контроль залишків і дефіциту</h3><p className="text-xs text-slate-400 mt-1">Доступний залишок враховує лише партії з чинною датою придатності.</p></div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
             <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Пошук матеріалу або коду" className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 min-w-0"/>
-            <select value={stockFilter} onChange={event => setStockFilter(event.target.value)} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300"><option value="all">Усі позиції</option><option value="deficit">Нижче мінімуму</option><option value="zero">Нульовий доступний залишок</option></select>
+            <select value={stockFilter} onChange={event => setStockFilter(event.target.value)} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300"><option value="all">Усі позиції</option><option value="deficit">Нижче мінімуму</option><option value="zero">Відсутні позиції</option></select>
             <select value={sortBy} onChange={event => setSortBy(event.target.value)} className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300"><option value="deficit">Сортувати: дефіцит</option><option value="available">Сортувати: доступний залишок</option><option value="name">Сортувати: назва</option></select>
             {(categoryFilter || alertFilter || stockFilter !== 'all' || search) && <button onClick={() => { setCategoryFilter(''); setAlertFilter(''); setStockFilter('all'); setSearch(''); }} className="px-3 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs font-bold">Скинути фільтри</button>}
           </div>
         </div>
         {(categoryFilter || alertFilter) && <div className="flex flex-wrap gap-2 mb-3">
           {categoryFilter && <span className="text-xs rounded-full bg-teal-900/30 text-teal-400 px-3 py-1">Категорія: {categoryFilter}</span>}
-          {alertFilter && <span className="text-xs rounded-full bg-amber-950/50 text-amber-400 px-3 py-1">Ризик: {({ expired: 'прострочені партії', expiring: 'закінчується термін', missing: 'без терміну придатності', zero: 'нульовий залишок', low: 'дефіцит' })[alertFilter] || alertFilter}</span>}
+          {alertFilter && <span className="text-xs rounded-full bg-amber-950/50 text-amber-400 px-3 py-1">Ризик: {({ expired: 'прострочені партії', expiring: 'закінчується термін', missing: 'без терміну придатності', zero: 'відсутні позиції', low: 'дефіцит' })[alertFilter] || alertFilter}</span>}
         </div>}
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left min-w-[700px]">
@@ -458,7 +594,7 @@ const Dashboard = ({ state, dispatch, sessionPin, setActiveTab }) => {
                 <td className="px-3 py-3 text-right font-bold text-white">{row.usable.toLocaleString('uk-UA')}</td>
                 <td className="px-3 py-3 text-right text-slate-400">{row.minimum.toLocaleString('uk-UA')}</td>
                 <td className={`px-3 py-3 text-right font-black ${row.deficit > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>{row.deficit.toLocaleString('uk-UA')}</td>
-                <td className="px-3 py-3">{row.expired > 0 ? <span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Є прострочене</span> : row.missingExpiry > 0 ? <span className="text-[10px] rounded-full bg-sky-950/50 text-sky-400 px-2 py-1">Немає терміну</span> : row.isLow && row.minimum > 0 ? <span className="text-[10px] rounded-full bg-amber-950/50 text-amber-400 px-2 py-1">Дефіцит</span> : row.expiring > 0 ? <span className="text-[10px] rounded-full bg-orange-950/50 text-orange-400 px-2 py-1">Скоро спливає</span> : <span className="text-[10px] rounded-full bg-emerald-950/50 text-emerald-400 px-2 py-1">У нормі</span>}</td>
+                <td className="px-3 py-3">{row.isAbsent ? <div className="flex flex-wrap gap-1"><span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Відсутній</span>{row.expired > 0 && <span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Є прострочене</span>}</div> : row.expired > 0 ? <span className="text-[10px] rounded-full bg-rose-950/50 text-rose-400 px-2 py-1">Є прострочене</span> : row.missingExpiry > 0 ? <span className="text-[10px] rounded-full bg-sky-950/50 text-sky-400 px-2 py-1">Немає терміну</span> : row.isLow && row.minimum > 0 ? <span className="text-[10px] rounded-full bg-amber-950/50 text-amber-400 px-2 py-1">Дефіцит</span> : row.expiring > 0 ? <span className="text-[10px] rounded-full bg-orange-950/50 text-orange-400 px-2 py-1">Скоро спливає</span> : <span className="text-[10px] rounded-full bg-emerald-950/50 text-emerald-400 px-2 py-1">У нормі</span>}</td>
               </tr>)}
               {!visibleMaterials.length && <tr><td colSpan="6" className="px-4 py-10 text-center text-slate-400">За цими фільтрами позицій не знайдено.</td></tr>}
             </tbody>
